@@ -257,11 +257,13 @@ def _capture_pane_to_bytes(
     buffer = QtCore.QBuffer()
     buffer.open(QtCore.QIODevice.WriteOnly)
     image.save(buffer, "PNG")
-    buffer.close()
 
+    # P2-2 fix: read buffer.data() BEFORE close(), because some Qt versions
+    # may clear internal data on close(). Extract data first, then close.
     # Get remote base64 module for encoding on the Houdini side
     conn = get_connection()
     if conn is None:
+        buffer.close()
         return {"status": "error", "message": "No active RPyC connection for image encoding"}
     remote_base64 = conn.modules.base64
 
@@ -274,6 +276,9 @@ def _capture_pane_to_bytes(
     raw_bytes_remote = qbyte_array.data()  # QByteArray.data() -> bytes on remote side
     image_base64 = str(remote_base64.b64encode(raw_bytes_remote).decode("utf-8"))
     image_size_bytes = len(qbyte_array)
+
+    # Now safe to close the buffer after data extraction
+    buffer.close()
 
     # Get pane name safely
     try:

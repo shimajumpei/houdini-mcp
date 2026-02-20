@@ -12,6 +12,7 @@ Crowd Source:
 DOP Simulation:
     - setup_crowd_dop: Build DOP network (crowdobject, crowdsolver, ground, gravity)
     - add_crowd_behavior: Add POP Steer behaviors (wander, seek, avoid, etc.)
+    - add_crowd_state: Add Crowd State DOPs (walk, idle, run) to the state machine
     - add_crowd_transition: Create state transitions with triggers
 
 Terrain:
@@ -26,11 +27,13 @@ Typical crowd pipeline:
     2. setup_crowd_source() -> scatter agents on surface
     3. setup_crowd_dop() -> simulation network
     4. add_crowd_behavior() -> steering behaviors
-    5. add_crowd_transition() -> state machine
-    6. validate_crowd_setup() -> check for issues
+    5. add_crowd_state() -> animation states (walk, idle, run)
+    6. add_crowd_transition() -> state machine transitions
+    7. validate_crowd_setup() -> check for issues
 """
 
 import logging
+import math
 from typing import Any, Dict, List, Optional
 
 from ._common import (
@@ -43,6 +46,18 @@ from ._common import (
 )
 
 logger = logging.getLogger("houdini_mcp.tools.crowd")
+
+
+def _try_hscript_batch(hou: Any):
+    """Try to create an HscriptBatch for faster bulk operations. Returns None if unavailable."""
+    try:
+        from .hscript import HscriptBatch
+        batch = HscriptBatch(hou)
+        if batch.is_available():
+            return batch
+    except Exception:
+        pass
+    return None
 
 
 # =============================================================================
@@ -61,13 +76,16 @@ BEHAVIOR_TYPE_MAP = {
     "obstacle": "popsteerobstacle",
 }
 
-# Maps trigger type names to Houdini crowdtrigger logic types
+# Maps trigger type names to Houdini crowdtrigger logic types.
+# P3-1 fix: "speed" and "attribute" were both mapped to "objectattribute".
+# "speed" should map to "particlespeed" (Particle speed trigger in Houdini).
 TRIGGER_TYPE_MAP = {
     "distance": "distancefromposition",
     "time": "timeinstate",
     "random": "random",
-    "speed": "objectattribute",
+    "speed": "particlespeed",
     "attribute": "objectattribute",
+    "state_duration": "currentstateduration",
     "custom": "custom",
 }
 
@@ -140,57 +158,62 @@ def setup_crowd_agent(
     if file_node:
         file_node.destroy()
 
-    nodes_created = []
+    # Wrap node creation in try/except to rollback (destroy geo container)
+    # on failure, preventing orphan nodes in the Houdini scene.
+    try:
+        # 1. Create agent node
+        agent = geo.createNode("agent", f"{agent_name}_agent")
 
-    # 1. Create agent node
-    agent = geo.createNode("agent", f"{agent_name}_agent")
-    nodes_created.append(agent)
+        if agent_file:
+            # Set input file if provided
+            if agent.parm("agentname"):
+                agent.parm("agentname").set(agent_name)
+            if agent.parm("input"):
+                agent.parm("input").set(1)  # File mode
+            if agent.parm("agentfile"):
+                agent.parm("agentfile").set(agent_file)
 
-    if agent_file:
-        # Set input file if provided
-        if agent.parm("agentname"):
-            agent.parm("agentname").set(agent_name)
-        if agent.parm("input"):
-            agent.parm("input").set(1)  # File mode
-        if agent.parm("agentfile"):
-            agent.parm("agentfile").set(agent_file)
+        last_node = agent
+        clip_node = None
 
-    last_node = agent
-    clip_node = None
+        # 2. Create agentclip node (optional, for additional clips)
+        if clip_paths:
+            clip_node = geo.createNode("agentclip", f"{agent_name}_clips")
+            clip_node.setFirstInput(last_node)
 
-    # 2. Create agentclip node (optional, for additional clips)
-    if clip_paths:
-        clip_node = geo.createNode("agentclip", f"{agent_name}_clips")
-        clip_node.setFirstInput(last_node)
-        nodes_created.append(clip_node)
+            # Configure clip loading
+            if clip_node.parm("numclips"):
+                clip_node.parm("numclips").set(len(clip_paths))
+                for i, clip_path in enumerate(clip_paths):
+                    clip_parm = clip_node.parm(f"clipfile{i+1}")
+                    if clip_parm:
+                        clip_parm.set(clip_path)
 
-        # Configure clip loading
-        if clip_node.parm("numclips"):
-            clip_node.parm("numclips").set(len(clip_paths))
-            for i, clip_path in enumerate(clip_paths):
-                clip_parm = clip_node.parm(f"clipfile{i+1}")
-                if clip_parm:
-                    clip_parm.set(clip_path)
+            last_node = clip_node
 
-        last_node = clip_node
+        # 3. Create agentprep node
+        prep = geo.createNode("agentprep", f"{agent_name}_prep")
+        prep.setFirstInput(last_node)
+        last_node = prep
 
-    # 3. Create agentprep node
-    prep = geo.createNode("agentprep", f"{agent_name}_prep")
-    prep.setFirstInput(last_node)
-    nodes_created.append(prep)
-    last_node = prep
+        # 4. Create agentdefinitioncache node
+        cache = geo.createNode("agentdefinitioncache", f"{agent_name}_cache")
+        cache.setFirstInput(last_node)
 
-    # 4. Create agentdefinitioncache node
-    cache = geo.createNode("agentdefinitioncache", f"{agent_name}_cache")
-    cache.setFirstInput(last_node)
-    nodes_created.append(cache)
+        # Set display/render flags on the final node
+        cache.setDisplayFlag(True)
+        cache.setRenderFlag(True)
 
-    # Set display/render flags on the final node
-    cache.setDisplayFlag(True)
-    cache.setRenderFlag(True)
+        # Layout the nodes
+        geo.layoutChildren()
 
-    # Layout the nodes
-    geo.layoutChildren()
+    except Exception as e:
+        # Rollback: destroy the entire geo container to avoid orphan nodes
+        try:
+            geo.destroy()
+        except Exception:
+            pass
+        return {"status": "error", "message": f"Failed during agent setup: {e}"}
 
     result = {
         "status": "success",
@@ -198,7 +221,7 @@ def setup_crowd_agent(
         "agent_path": agent.path(),
         "prep_path": prep.path(),
         "cache_path": cache.path(),
-        "node_count": len(nodes_created) + 1,  # +1 for geo container
+        "node_count": 5 if clip_node else 4,  # geo + agent + [clip] + prep + cache
     }
 
     if clip_node:
@@ -280,10 +303,13 @@ def setup_crowd_source(
     }
 
     if source_type == "scatter":
-        # Create grid for scattering surface
+        # P2-3 fix: adaptive grid sizing based on agent count instead of
+        # hardcoded 50x50. Roughly 2 units per agent, clamped to [20, 500].
+        import math
+        grid_size = max(20.0, min(500.0, math.sqrt(count) * 2.0))
         grid = parent.createNode("grid", "crowd_scatter_grid")
-        grid.parm("sizex").set(50.0)
-        grid.parm("sizey").set(50.0)
+        grid.parm("sizex").set(grid_size)
+        grid.parm("sizey").set(grid_size)
         result["grid_path"] = grid.path()
 
         # Create scatter for agent placement
@@ -292,9 +318,14 @@ def setup_crowd_source(
         scatter.parm("npts").set(count)
         result["scatter_path"] = scatter.path()
 
-        # Create object merge to bring in agent definition
+        # P1-2 fix: object_merge's objpath1 expects a SOP-level path to merge
+        # geometry from. agent_setup_path is already a SOP path (e.g.,
+        # /obj/soldier_agent_setup/soldier_cache), which is correct for object_merge.
         obj_merge = parent.createNode("object_merge", "agent_definition_in")
         obj_merge.parm("objpath1").set(agent_setup_path)
+        # Ensure xformtype is set to "None" (0) to avoid double-transforming
+        if obj_merge.parm("xformtype"):
+            obj_merge.parm("xformtype").set(0)
 
         # Create crowdsource
         crowd_source = parent.createNode("crowdsource", "crowd_source")
@@ -305,6 +336,8 @@ def setup_crowd_source(
         # Simple: just merge agent def and create source
         obj_merge = parent.createNode("object_merge", "agent_definition_in")
         obj_merge.parm("objpath1").set(agent_setup_path)
+        if obj_merge.parm("xformtype"):
+            obj_merge.parm("xformtype").set(0)
 
         crowd_source = parent.createNode("crowdsource", "crowd_source")
         crowd_source.setInput(0, obj_merge)
@@ -380,40 +413,49 @@ def setup_crowd_dop(
     for child in dopnet.children():
         child.destroy()
 
-    # Create crowd object
-    crowd_obj = dopnet.createNode("crowdobject", "crowdobject1")
+    # Wrap node creation in try/except to rollback (destroy dopnet)
+    # on failure, preventing orphan nodes in the Houdini scene.
+    try:
+        # Create crowd object
+        crowd_obj = dopnet.createNode("crowdobject", "crowdobject1")
 
-    # Set SOP path to crowd source if provided.
-    # soppath must point to the crowdsource SOP node itself, NOT its geo container.
-    if crowd_source_path:
-        source_node = hou.node(crowd_source_path)
-        if source_node and crowd_obj.parm("soppath"):
-            crowd_obj.parm("soppath").set(crowd_source_path)
+        # Set SOP path to crowd source if provided.
+        # soppath must point to the crowdsource SOP node itself, NOT its geo container.
+        if crowd_source_path:
+            source_node = hou.node(crowd_source_path)
+            if source_node and crowd_obj.parm("soppath"):
+                crowd_obj.parm("soppath").set(crowd_source_path)
 
-    # Create crowd solver
-    crowd_solver = dopnet.createNode("crowdsolver", "crowdsolver1")
-    crowd_solver.setFirstInput(crowd_obj)
+        # Create crowd solver
+        crowd_solver = dopnet.createNode("crowdsolver", "crowdsolver1")
+        crowd_solver.setFirstInput(crowd_obj)
 
-    if crowd_solver.parm("substeps"):
-        crowd_solver.parm("substeps").set(solver_substeps)
+        if crowd_solver.parm("substeps"):
+            crowd_solver.parm("substeps").set(solver_substeps)
 
-    # Create ground plane
-    ground = dopnet.createNode("groundplane", "ground1")
+        # Create ground plane
+        ground = dopnet.createNode("groundplane", "ground1")
 
-    # Create gravity
-    gravity = dopnet.createNode("gravity", "gravity1")
+        # Create gravity
+        gravity = dopnet.createNode("gravity", "gravity1")
 
-    # Wire: crowdsolver gets merge of crowd_obj, then ground and gravity
-    # apply to same simulation
-    # Standard DOP wiring: solver takes crowd object as first input
-    # ground and gravity are merged separately and applied to simulation
-    merge = dopnet.createNode("merge", "merge_forces")
-    merge.setInput(0, crowd_solver)
-    merge.setInput(1, ground)
-    merge.setInput(2, gravity)
+        # Wire: crowdsolver gets merge of crowd_obj, then ground and gravity
+        # apply to same simulation
+        merge = dopnet.createNode("merge", "merge_forces")
+        merge.setInput(0, crowd_solver)
+        merge.setInput(1, ground)
+        merge.setInput(2, gravity)
 
-    # Layout
-    dopnet.layoutChildren()
+        # Layout
+        dopnet.layoutChildren()
+
+    except Exception as e:
+        # Rollback: destroy the entire dopnet to avoid orphan nodes
+        try:
+            dopnet.destroy()
+        except Exception:
+            pass
+        return {"status": "error", "message": f"Failed during DOP setup: {e}"}
 
     return {
         "status": "success",
@@ -503,32 +545,52 @@ def add_crowd_behavior(
             "message": f"No crowdsolver found in {dopnet_path}. Run setup_crowd_dop() first.",
         }
 
-    # Create behavior node inside the DOP network
-    name = behavior_name or f"steer_{behavior_type}"
-    behavior_node = dopnet.createNode(dop_node_type, name)
+    # Create behavior node inside the DOP network.
+    # P3-2 fix: detect if Houdini auto-renamed the node due to name collision
+    # and report the actual name in the response.
+    requested_name = behavior_name or f"steer_{behavior_type}"
+    behavior_node = dopnet.createNode(dop_node_type, requested_name)
     if behavior_node is None:
         return {
             "status": "error",
             "message": f"Failed to create {dop_node_type} node. "
             "This node type may not be available in your Houdini version.",
         }
+    actual_name = behavior_node.name()
+    name_changed = actual_name != requested_name
 
     # Wire behavior into the crowd solver's inputs.
     # Crowd solver input 0 = crowd object. Inputs 1+ = POP Steer behaviors.
-    # We must connect behavior → solver (solver.setInput), NOT solver → behavior.
+    # P1-1 fix: find first None slot at index >= 1, not just len(inputs),
+    # because Houdini input tuples can have None gaps.
     existing_inputs = crowd_solver.inputs()
-    next_input = len(existing_inputs)
-    if next_input < 1:
-        next_input = 1
+    next_input = None
+    for idx in range(1, len(existing_inputs)):
+        if existing_inputs[idx] is None:
+            next_input = idx
+            break
+    if next_input is None:
+        next_input = max(1, len(existing_inputs))
     try:
         crowd_solver.setInput(next_input, behavior_node)
     except Exception as e:
         logger.warning(f"Could not wire behavior to solver input {next_input}: {e}")
 
-    # Apply settings
+    # P1-3 fix: validate settings dict before applying — limit key count
+    # and restrict value types to prevent expression injection via parm.set()
     settings_applied = []
     if settings:
+        _MAX_SETTINGS = 50
+        if len(settings) > _MAX_SETTINGS:
+            return {
+                "status": "error",
+                "message": f"Too many settings ({len(settings)}), max {_MAX_SETTINGS}",
+            }
         for parm_name, value in settings.items():
+            # Only allow safe value types
+            if not isinstance(value, (int, float, str, list, tuple, bool)):
+                logger.warning(f"Skipping {parm_name}: unsupported type {type(value).__name__}")
+                continue
             parm = behavior_node.parm(parm_name)
             if parm:
                 try:
@@ -539,12 +601,167 @@ def add_crowd_behavior(
 
     dopnet.layoutChildren()
 
-    return {
+    result = {
         "status": "success",
         "behavior_path": behavior_node.path(),
+        "behavior_name": actual_name,
         "behavior_type": behavior_type,
         "dop_node_type": dop_node_type,
         "settings_applied": settings_applied,
+    }
+    if name_changed:
+        result["name_changed"] = True
+        result["requested_name"] = requested_name
+        result["note"] = (
+            f"Node renamed from '{requested_name}' to '{actual_name}' "
+            "because a node with the original name already exists."
+        )
+    return result
+
+
+# =============================================================================
+# Crowd States
+# =============================================================================
+
+
+@handle_connection_errors("add_crowd_state")
+def add_crowd_state(
+    dopnet_path: str,
+    state_name: str,
+    clip_name: Optional[str] = None,
+    locomotion: bool = False,
+    playback_speed: float = 1.0,
+    variance: float = 0.0,
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Add a Crowd State DOP to the simulation.
+
+    Crowd States define animation states (walk, idle, run) for the state machine.
+    Each state maps to an animation clip and controls playback behavior.
+    States are merged and wired to the Crowd Solver's 3rd input.
+
+    Without at least one Crowd State, agents will not animate even if
+    steering behaviors are configured.
+
+    Args:
+        dopnet_path: Path to the DOP network (e.g., "/obj/crowd_sim_dopnet")
+        state_name: Name of the state (e.g., "walk", "idle", "run").
+            This also becomes the node name, and by default the clip name.
+        clip_name: Optional explicit clip name. If not provided, uses state_name
+            (Houdini default uses $OS which maps to the node name).
+        locomotion: If True, sets Clip Playback Type to "Locomotive" for
+            in-place clips that have extracted locomotion data.
+        playback_speed: Clip playback speed multiplier (default: 1.0)
+        variance: Random variance for playback speed (0.0-1.0) to prevent
+            synchronized movement across agents (default: 0.0 = disabled)
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - state_path: Path to the crowdstate node
+        - state_name: Name of the state
+        - clip_name: Clip name used
+        - merge_path: Path to the states merge node (if created)
+        - solver_wired: Whether the merge was wired to the solver's 3rd input
+
+    Examples:
+        add_crowd_state("/obj/crowd_sim_dopnet", "idle")
+        add_crowd_state("/obj/crowd_sim_dopnet", "walk", locomotion=True)
+        add_crowd_state("/obj/crowd_sim_dopnet", "run",
+                       clip_name="run_cycle", locomotion=True, variance=0.1)
+    """
+    hou = ensure_connected(host, port)
+
+    dopnet = hou.node(dopnet_path)
+    if dopnet is None:
+        return {"status": "error", "message": f"DOP network not found: {dopnet_path}"}
+
+    # Create crowd state node
+    state_node = dopnet.createNode("crowdstate", state_name)
+    if state_node is None:
+        return {
+            "status": "error",
+            "message": f"Failed to create crowdstate node '{state_name}'.",
+        }
+
+    # Set clip name if explicitly provided (default $OS uses node name)
+    if clip_name and state_node.parm("clipname"):
+        state_node.parm("clipname").set(clip_name)
+
+    # Set locomotion type: 0 = In-Place, 1 = Locomotive
+    if locomotion and state_node.parm("locomotiontype"):
+        state_node.parm("locomotiontype").set(1)
+
+    # Set playback speed
+    if playback_speed != 1.0 and state_node.parm("playbackspeed"):
+        state_node.parm("playbackspeed").set(playback_speed)
+
+    # Enable playback variance for natural-looking crowds
+    if variance > 0.0:
+        if state_node.parm("randomizeclips"):
+            state_node.parm("randomizeclips").set(1)
+        if state_node.parm("speedvariance"):
+            state_node.parm("speedvariance").set(variance)
+
+    # Find or create a merge node for states.
+    # Convention: a merge named "crowd_states_merge" collects all states.
+    merge_node = dopnet.node("crowd_states_merge")
+    merge_created = False
+    if merge_node is None:
+        merge_node = dopnet.createNode("merge", "crowd_states_merge")
+        merge_created = True
+
+    # Wire the new state into the merge's next available input
+    if merge_node is not None:
+        existing_merge_inputs = merge_node.inputs()
+        next_merge_idx = None
+        for idx in range(len(existing_merge_inputs)):
+            if existing_merge_inputs[idx] is None:
+                next_merge_idx = idx
+                break
+        if next_merge_idx is None:
+            next_merge_idx = len(existing_merge_inputs)
+        try:
+            merge_node.setInput(next_merge_idx, state_node)
+        except Exception as e:
+            logger.warning(f"Could not wire state to merge: {e}")
+
+    # Wire the states merge to the crowd solver's 3rd input (index 2).
+    # Per Houdini docs: solver input 0 = crowd object, input 2 = merged states.
+    solver_wired = False
+    crowd_solver = None
+    for child in dopnet.children():
+        if child.type().name().startswith("crowdsolver"):
+            crowd_solver = child
+            break
+
+    if crowd_solver and merge_node:
+        # Only wire if not already connected at input 2
+        existing_inputs = crowd_solver.inputs()
+        current_input_2 = existing_inputs[2] if len(existing_inputs) > 2 else None
+        if current_input_2 is None or current_input_2.path() != merge_node.path():
+            try:
+                crowd_solver.setInput(2, merge_node)
+                solver_wired = True
+            except Exception as e:
+                logger.warning(f"Could not wire states merge to solver input 2: {e}")
+        else:
+            # Already wired correctly
+            solver_wired = True
+
+    dopnet.layoutChildren()
+
+    return {
+        "status": "success",
+        "state_path": state_node.path(),
+        "state_name": state_name,
+        "clip_name": clip_name or state_name,
+        "locomotion": locomotion,
+        "merge_path": merge_node.path() if merge_node else None,
+        "merge_created": merge_created,
+        "solver_wired": solver_wired,
     }
 
 
@@ -660,11 +877,16 @@ def add_crowd_transition(
             break
 
     if crowd_solver:
-        # Connect transition to solver
+        # P1-1 fix: find first available (None) input slot at index >= 1,
+        # because len(inputs) doesn't account for None gaps in sparse tuples.
         existing_inputs = crowd_solver.inputs()
-        next_input = len(existing_inputs)
-        if next_input < 1:
-            next_input = 1
+        next_input = None
+        for idx in range(1, len(existing_inputs)):
+            if existing_inputs[idx] is None:
+                next_input = idx
+                break
+        if next_input is None:
+            next_input = max(1, len(existing_inputs))
         try:
             crowd_solver.setInput(next_input, transition)
         except Exception as e:
@@ -741,12 +963,20 @@ def setup_crowd_terrain(
         grid.parm("cols").set(50)
         result["terrain_path"] = grid.path()
 
-    # Create agent terrain adaptation node
+    # P2-1 fix: create terrain adaptation node AND wire its inputs.
+    # Input 0 = agents (crowd source), Input 1 = terrain geometry.
+    # Previously the node was created but left unwired.
+    terrain_geo_node = hou.node(result["terrain_path"]) if "terrain_path" in result else None
     try:
         adaptation = parent.createNode("agentterrainadaptation", "terrain_adapt")
         if adaptation:
+            # Wire terrain geometry as input
+            if terrain_geo_node:
+                adaptation.setInput(0, terrain_geo_node)
             if enable_foot_locking and adaptation.parm("enablefootlocking"):
                 adaptation.parm("enablefootlocking").set(True)
+            adaptation.setDisplayFlag(True)
+            adaptation.setRenderFlag(True)
             result["adaptation_path"] = adaptation.path()
     except Exception as e:
         logger.info(f"agentterrainadaptation not available: {e}")
@@ -806,7 +1036,7 @@ def get_crowd_info(
         "agent", "agentclip", "agentprep", "agentdefinitioncache",
         "crowdsource", "crowdobject", "crowdsolver", "crowdtrigger",
         "crowdtransition", "crowdstate",
-        "agentterrainadaptation", "agentterraiprojection",
+        "agentterrainadaptation", "agentterrainprojection",
     }
     steer_prefix = "popsteer"
 
@@ -814,85 +1044,111 @@ def get_crowd_info(
     crowd_sources = []
     dop_networks = []
     behaviors = []
+    states = []
     transitions = []
     triggers = []
     other_crowd_nodes = []
 
-    def _scan_node(node, depth=0):
-        if depth > 20:
-            return
-
-        try:
-            node_type = node.type().name()
-        except Exception:
-            return
-
-        # Classify crowd nodes
+    def _classify_node(path, node_type, node=None):
+        """Classify a single node by its type into the appropriate list."""
+        name = path.rsplit("/", 1)[-1] if "/" in path else path
         if node_type == "agent":
-            agent_definitions.append({
-                "path": node.path(),
-                "name": node.name(),
-                "type": node_type,
-            })
+            agent_definitions.append({"path": path, "name": name, "type": node_type})
         elif node_type.startswith("crowdsource"):
-            info = {"path": node.path(), "name": node.name()}
-            if node.parm("initialstate"):
+            info = {"path": path, "name": name}
+            # Fetch initial_state param only for crowdsource nodes
+            if node is None:
+                node = hou.node(path)
+            if node and node.parm("initialstate"):
                 try:
                     info["initial_state"] = node.parm("initialstate").eval()
                 except Exception:
                     pass
             crowd_sources.append(info)
         elif node_type.startswith("crowdsolver"):
-            dop_networks.append({
-                "solver_path": node.path(),
-                "dopnet_path": node.parent().path() if node.parent() else None,
-            })
+            parent_path = "/".join(path.split("/")[:-1]) if "/" in path else None
+            dop_networks.append({"solver_path": path, "dopnet_path": parent_path})
         elif node_type.startswith(steer_prefix):
-            behaviors.append({
-                "path": node.path(),
-                "name": node.name(),
-                "type": node_type,
-            })
+            behaviors.append({"path": path, "name": name, "type": node_type})
         elif node_type.startswith("crowdtrigger"):
-            trigger_info = {"path": node.path(), "name": node.name()}
-            if node.parm("triggerlogic"):
+            trigger_info = {"path": path, "name": name}
+            if node is None:
+                node = hou.node(path)
+            if node and node.parm("triggerlogic"):
                 try:
                     trigger_info["logic"] = node.parm("triggerlogic").eval()
                 except Exception:
                     pass
             triggers.append(trigger_info)
+        elif node_type.startswith("crowdstate"):
+            state_info = {"path": path, "name": name}
+            if node is None:
+                node = hou.node(path)
+            if node and node.parm("clipname"):
+                try:
+                    state_info["clip_name"] = node.parm("clipname").eval()
+                except Exception:
+                    pass
+            states.append(state_info)
         elif node_type.startswith("crowdtransition"):
-            trans_info = {"path": node.path(), "name": node.name()}
-            if node.parm("inputstate"):
-                try:
-                    trans_info["from_state"] = node.parm("inputstate").eval()
-                except Exception:
-                    pass
-            if node.parm("outputstate"):
-                try:
-                    trans_info["to_state"] = node.parm("outputstate").eval()
-                except Exception:
-                    pass
+            trans_info = {"path": path, "name": name}
+            if node is None:
+                node = hou.node(path)
+            if node:
+                if node.parm("inputstate"):
+                    try:
+                        trans_info["from_state"] = node.parm("inputstate").eval()
+                    except Exception:
+                        pass
+                if node.parm("outputstate"):
+                    try:
+                        trans_info["to_state"] = node.parm("outputstate").eval()
+                    except Exception:
+                        pass
             transitions.append(trans_info)
         elif any(node_type.startswith(kw) for kw in crowd_keywords):
-            other_crowd_nodes.append({
-                "path": node.path(),
-                "name": node.name(),
-                "type": node_type,
-            })
+            other_crowd_nodes.append({"path": path, "name": name, "type": node_type})
 
-        # Recurse into children
+    # P2-3 optimization: use hscript batch when available to get all paths and types
+    # in 2 RPC calls instead of N recursive calls. Falls back to per-node scan.
+    batch = _try_hscript_batch(hou)
+    used_batch = False
+    if batch:
         try:
-            for child in node.children():
-                _scan_node(child, depth + 1)
-        except Exception:
-            pass
+            all_paths = batch.list_all_paths(root_path)
+            if all_paths:
+                all_types = batch.get_node_types(all_paths)
+                for path, node_type in all_types.items():
+                    # Only process crowd-related types to minimize further RPC
+                    if (node_type.startswith(steer_prefix) or
+                            any(node_type.startswith(kw) for kw in crowd_keywords)):
+                        _classify_node(path, node_type)
+                used_batch = True
+        except Exception as e:
+            logger.debug(f"hscript batch unavailable, falling back to recursive scan: {e}")
 
-    _scan_node(root)
+    if not used_batch:
+        # Fallback: recursive per-node scan (slower but always works)
+        def _scan_node(node, depth=0):
+            if depth > 20:
+                return
+            try:
+                node_type = node.type().name()
+            except Exception:
+                return
+            _classify_node(node.path(), node_type, node)
+            try:
+                for child in node.children():
+                    _scan_node(child, depth + 1)
+            except Exception:
+                pass
+
+        _scan_node(root)
 
     total = (
         len(agent_definitions) + len(crowd_sources) + len(dop_networks)
-        + len(behaviors) + len(transitions) + len(triggers) + len(other_crowd_nodes)
+        + len(behaviors) + len(states) + len(transitions) + len(triggers)
+        + len(other_crowd_nodes)
     )
 
     return {
@@ -902,6 +1158,7 @@ def get_crowd_info(
         "crowd_sources": crowd_sources,
         "dop_networks": dop_networks,
         "behaviors": behaviors,
+        "states": states,
         "transitions": transitions,
         "triggers": triggers,
         "other_crowd_nodes": other_crowd_nodes,
@@ -929,6 +1186,7 @@ def validate_crowd_setup(
     - Missing DOP network or crowd solver
     - Missing ground plane
     - No behaviors defined
+    - No crowd states defined (agents won't animate without states)
     - Missing state transitions
 
     Args:
@@ -1064,7 +1322,16 @@ def validate_crowd_setup(
             "fix_hint": "Use add_crowd_behavior() to add wandering, seeking, or other movement",
         })
 
-    # Check 6: Transitions
+    # Check 6: Crowd States — agents won't animate without at least one state
+    if info["dop_networks"] and not info.get("states"):
+        issues.append({
+            "severity": "critical",
+            "category": "state",
+            "message": "No Crowd States found. Agents will not animate without states.",
+            "fix_hint": "Use add_crowd_state() to define animation states (e.g., 'idle', 'walk')",
+        })
+
+    # Check 7: Transitions
     if info["dop_networks"] and not info["transitions"]:
         issues.append({
             "severity": "info",

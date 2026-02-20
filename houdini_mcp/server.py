@@ -1522,6 +1522,45 @@ def add_crowd_behavior(
 
 
 @mcp.tool()
+def add_crowd_state(
+    dopnet_path: str,
+    state_name: str,
+    clip_name: Optional[str] = None,
+    locomotion: bool = False,
+    playback_speed: float = 1.0,
+    variance: float = 0.0,
+) -> Dict[str, Any]:
+    """
+    Add a Crowd State to the simulation's state machine.
+
+    Crowd States define animation states (walk, idle, run) and are essential for
+    agent animation. Without states, agents will not animate even with behaviors.
+    States are automatically merged and wired to the Crowd Solver's 3rd input.
+
+    Args:
+        dopnet_path: Path to the DOP network
+        state_name: State name (e.g., "walk", "idle", "run"). Also used as the
+            default clip name.
+        clip_name: Optional explicit clip name (default: uses state_name)
+        locomotion: If True, sets Locomotive playback for in-place clips
+        playback_speed: Clip speed multiplier (default: 1.0)
+        variance: Random speed variance 0.0-1.0 for natural movement (default: 0.0)
+
+    Returns:
+        Dict with state_path, state_name, clip_name, merge_path, solver_wired
+
+    Examples:
+        add_crowd_state("/obj/crowd_sim_dopnet", "idle")
+        add_crowd_state("/obj/crowd_sim_dopnet", "walk", locomotion=True)
+        add_crowd_state("/obj/crowd_sim_dopnet", "run", locomotion=True, variance=0.1)
+    """
+    return tools.add_crowd_state(
+        dopnet_path, state_name, clip_name, locomotion, playback_speed, variance,
+        HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
 def add_crowd_transition(
     dopnet_path: str,
     from_state: str,

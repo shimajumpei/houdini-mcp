@@ -33,6 +33,9 @@ def _get_remote_modules():
     return remote_os, remote_tempfile
 
 
+_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB safety limit for base64 transfer
+
+
 def _read_remote_file_as_base64(file_path: str) -> str:
     """Read a file on the remote Houdini machine and return base64-encoded string.
 
@@ -48,10 +51,25 @@ def _read_remote_file_as_base64(file_path: str) -> str:
 
     Returns:
         Base64-encoded string of the file contents
+
+    Raises:
+        ValueError: If file exceeds _MAX_FILE_SIZE_BYTES (P1-6 safety guard)
+        FileNotFoundError: If file does not exist
     """
     conn = get_connection()
     if conn is None:
         raise HoudiniConnectionError("No active connection to Houdini")
+
+    # P1-6 fix: check file size before attempting base64 transfer to avoid
+    # transferring huge strings (e.g., 4096x4096 render = ~85MB base64)
+    remote_os = conn.modules.os
+    file_size = remote_os.path.getsize(file_path)
+    if file_size > _MAX_FILE_SIZE_BYTES:
+        raise ValueError(
+            f"File too large for base64 transfer: {file_size} bytes "
+            f"(limit: {_MAX_FILE_SIZE_BYTES} bytes). "
+            "Reduce resolution or use file-based output."
+        )
 
     # Access remote modules for encoding on the Houdini side
     remote_base64 = conn.modules.base64
@@ -297,19 +315,29 @@ def render_viewport(
         else:
             camera.parm("projection").set(0)  # Perspective
 
+        # Verify /out context exists BEFORE creating temp files (P0-4 fix:
+        # avoids rop being unbound in finally if early-return happened after mkstemp)
+        out_context = hou.node("/out")
+        if out_context is None:
+            return {"status": "error", "message": "Cannot find /out context"}
+
         # Get remote modules for file operations on the Houdini machine
         remote_os, remote_tempfile = _get_remote_modules()
 
         # Create temp file for output ON THE REMOTE MACHINE
+        # P1-5 fix: wrap remote_os.close(fd) in try/except to avoid RPyC fd leak
         suffix = f".{output_format}"
         fd, output_path = remote_tempfile.mkstemp(suffix=suffix)
-        remote_os.close(fd)
+        try:
+            remote_os.close(fd)
+        except Exception:
+            pass  # fd leak is minor compared to crashing
+
+        # P0-4 fix: initialize rop to None before try block so finally
+        # doesn't get NameError if an exception occurs before rop assignment
+        rop = None
 
         try:
-            out_context = hou.node("/out")
-            if out_context is None:
-                return {"status": "error", "message": "Cannot find /out context"}
-
             # Render using OpenGL or Karma
             if renderer.lower() == "opengl":
                 rop_name = "_mcp_opengl_rop"
@@ -351,36 +379,33 @@ def render_viewport(
             else:
                 return {"status": "error", "message": f"Unknown renderer: {renderer}"}
 
-            # Read rendered image from REMOTE MACHINE and encode as base64
-            # NOTE: We encode on the remote side because RPyC netref proxies
-            # don't materialize binary data. Strings auto-materialize over RPyC.
-            if remote_os.path.exists(output_path):
+            # P0-5 fix: wrap file read in try/except instead of exists() check
+            # to avoid TOCTOU race (file can vanish between exists() and open())
+            try:
                 image_base64 = _read_remote_file_as_base64(output_path)
+            except (FileNotFoundError, OSError) as e:
+                return {"status": "error", "message": f"Render output file not readable: {e}"}
 
-                result = {
-                    "status": "success",
-                    "image_base64": image_base64,
-                    "format": output_format,
-                    "resolution": [width, height],
-                    "camera_path": camera.path(),
-                    "renderer": renderer,
-                }
-                if bbox_info:
-                    result["bounding_box"] = bbox_info
-                return result
-            else:
-                return {"status": "error", "message": "Render completed but output file not found"}
+            result = {
+                "status": "success",
+                "image_base64": image_base64,
+                "format": output_format,
+                "resolution": [width, height],
+                "camera_path": camera.path(),
+                "renderer": renderer,
+            }
+            if bbox_info:
+                result["bounding_box"] = bbox_info
+            return result
 
         finally:
             # Clean up temp file on remote machine
-            if remote_os.path.exists(output_path):
-                try:
-                    remote_os.remove(output_path)
-                except Exception:
-                    pass
+            try:
+                remote_os.remove(output_path)
+            except Exception:
+                pass
 
             # Clean up MCP-created scene nodes (camera, null, ROP)
-            # These are temporary nodes that should not persist in the scene.
             for cleanup_name, cleanup_context in [
                 (cam_name, obj_context),
                 (null_name, obj_context),
@@ -392,7 +417,7 @@ def render_viewport(
                 except Exception:
                     pass
 
-            # Clean up ROP node in /out
+            # Clean up ROP node in /out — rop is guaranteed to be defined (P0-4)
             try:
                 if rop is not None:
                     rop.destroy()
@@ -572,9 +597,13 @@ def render_quad_view(
                     camera.parm("projection").set(0)  # Perspective
 
                 # Create temp file for output ON THE REMOTE MACHINE
+                # P1-5 fix: wrap close in try/except to avoid RPyC fd leak crash
                 suffix = f".{output_format}"
                 fd, output_path = remote_tempfile.mkstemp(suffix=suffix)
-                remote_os.close(fd)
+                try:
+                    remote_os.close(fd)
+                except Exception:
+                    pass
 
                 try:
                     # Configure and render
@@ -670,10 +699,15 @@ def render_quad_view(
         # Calculate total render time
         total_time_ms = (time.time() - start_time) * 1000
 
+        # P1-7 fix: report "error" when all views failed, matching
+        # the capture_multiple_panes pattern instead of always "success"
+        success_count = sum(1 for v in view_results if "image_base64" in v)
         result = {
-            "status": "success",
+            "status": "success" if success_count > 0 else "error",
             "views": view_results,
             "renderer": renderer,
+            "success_count": success_count,
+            "total_views": len(view_results),
             "total_render_time_ms": round(total_time_ms, 1),
         }
 
