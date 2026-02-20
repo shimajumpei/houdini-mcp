@@ -1672,6 +1672,276 @@ def validate_crowd_setup(
     return tools.validate_crowd_setup(root_path, HOUDINI_HOST, HOUDINI_PORT)
 
 
+@mcp.tool()
+def setup_crowd_formation(
+    parent_path: str,
+    agent_setup_path: str,
+    rows: int = 5,
+    columns: int = 5,
+    spacing: float = 2.0,
+    initial_state: str = "idle",
+) -> Dict[str, Any]:
+    """
+    Create formation-based crowd placement.
+
+    Sets up agents in a structured grid formation instead of random scattering.
+
+    Args:
+        parent_path: Path to the geometry container (e.g., "/obj/crowd_sim")
+        agent_setup_path: Path to the agent definition cache node
+        rows: Number of rows in the formation (default: 5)
+        columns: Number of columns in the formation (default: 5)
+        spacing: Distance between agents (default: 2.0)
+        initial_state: Initial crowd state name (default: "idle")
+
+    Returns:
+        Dict with geo_path, source_path, agent_count, formation config
+
+    Examples:
+        setup_crowd_formation("/obj/crowd_sim", "/obj/agent_setup/cache",
+                             rows=10, columns=10, spacing=3.0)
+    """
+    return tools.setup_crowd_formation(
+        parent_path, agent_setup_path, rows, columns, spacing, initial_state,
+        HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def add_crowd_clip_transition_graph(
+    parent_path: str,
+    agent_setup_path: str,
+    clip_names: Optional[List[str]] = None,
+    blend_frames: int = 10,
+    auto_compute: bool = True,
+) -> Dict[str, Any]:
+    """
+    Create a Clip Transition Graph SOP for smooth animation blending.
+
+    Defines optimal transition points between clips for seamless state changes.
+
+    Args:
+        parent_path: Path to the agent setup geometry container
+        agent_setup_path: Path to the agent definition cache node
+        clip_names: Optional list of clip names to include
+        blend_frames: Number of frames for transition blending (default: 10)
+        auto_compute: Auto-compute sync frames from foot timing (default: True)
+
+    Returns:
+        Dict with graph_path, cache_path, blend_frames, auto_compute
+
+    Examples:
+        add_crowd_clip_transition_graph("/obj/agent_setup", "/obj/agent_setup/cache")
+    """
+    return tools.add_crowd_clip_transition_graph(
+        parent_path, agent_setup_path, clip_names, blend_frames, auto_compute,
+        HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def add_crowd_layer(
+    parent_path: str,
+    agent_setup_path: str,
+    layer_name: str,
+    shape_geometry_path: Optional[str] = None,
+    transform_name: Optional[str] = None,
+    layer_assignments: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Set up agent layers for visual diversity (props, clothing variants).
+
+    Creates agentlayer SOP for adding geometry layers and optionally
+    crowdassignlayers SOP for random layer assignment.
+
+    Args:
+        parent_path: Path to the agent setup geometry container
+        agent_setup_path: Path to the agent definition cache node
+        layer_name: Name for the layer (e.g., "sword", "shield", "hat")
+        shape_geometry_path: Optional path to geometry SOP for the layer shape
+        transform_name: Optional joint name to attach the shape to (e.g., "RightHand")
+        layer_assignments: Optional list of assignment configs with "name" and "weight"
+
+    Returns:
+        Dict with layer_path, assign_path (if assignments), cache_path, layer_name
+
+    Examples:
+        add_crowd_layer("/obj/agent_setup", agent_cache, "sword",
+                       transform_name="RightHand")
+    """
+    return tools.add_crowd_layer(
+        parent_path, agent_setup_path, layer_name, shape_geometry_path,
+        transform_name, layer_assignments, HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def setup_crowd_ragdoll(
+    agent_setup_path: str,
+    dopnet_path: str,
+    collision_shape: str = "capsule",
+    create_joints: bool = True,
+) -> Dict[str, Any]:
+    """
+    Set up ragdoll physics for crowd agents.
+
+    Creates SOP-level collision layer and joint configuration, plus DOP-level
+    Multisolver + Bullet Solver setup for ragdoll transitions.
+
+    Args:
+        agent_setup_path: Path to the agent setup geometry container
+        dopnet_path: Path to the DOP network with crowd solver
+        collision_shape: Default collision shape: "capsule", "box", or "sphere"
+        create_joints: If True, create joint configuration node (default: True)
+
+    Returns:
+        Dict with collision_layer_path, configure_joints_path, multisolver_path,
+        bullet_solver_path, ragdoll_state_path
+
+    Examples:
+        setup_crowd_ragdoll("/obj/soldier_agent_setup", "/obj/crowd_sim_dopnet")
+    """
+    return tools.setup_crowd_ragdoll(
+        agent_setup_path, dopnet_path, collision_shape, create_joints,
+        HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def add_crowd_look_at(
+    dopnet_path: str,
+    target_position: Optional[List[float]] = None,
+    target_node_path: Optional[str] = None,
+    eye_offset: Optional[List[float]] = None,
+    head_joint: str = "Head",
+) -> Dict[str, Any]:
+    """
+    Add Agent Look At behavior to the crowd simulation.
+
+    Creates agentlookat and agentlookatapply DOP nodes for head tracking.
+
+    Args:
+        dopnet_path: Path to the DOP network
+        target_position: Optional [x, y, z] target position
+        target_node_path: Optional path to a target node
+        eye_offset: Optional [x, y, z] offset from head joint
+        head_joint: Name of the head joint (default: "Head")
+
+    Returns:
+        Dict with lookat_path, apply_path, target
+
+    Examples:
+        add_crowd_look_at("/obj/crowd_sim_dopnet", target_position=[10, 2, 0])
+    """
+    return tools.add_crowd_look_at(
+        dopnet_path, target_position, target_node_path, eye_offset, head_joint,
+        HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def setup_motion_path(
+    parent_path: str,
+    agent_setup_path: str,
+    clip_name: str = "walk",
+    clip_speed: float = 1.0,
+    start_frame: int = 1,
+    end_frame: int = 240,
+    enable_avoid: bool = False,
+) -> Dict[str, Any]:
+    """
+    Create SOP-based Motion Path workflow for crowd (Houdini 20+).
+
+    Creates the chain: crowdmotionpath -> (optional avoid) -> crowdmotionpathevaluate.
+    Art-directable alternative to DOP simulation for fast iteration.
+
+    Args:
+        parent_path: Path to the geometry container
+        agent_setup_path: Path to the agent definition/source node
+        clip_name: Animation clip name (default: "walk")
+        clip_speed: Clip playback speed (default: 1.0)
+        start_frame: Start frame for path generation (default: 1)
+        end_frame: End frame for path generation (default: 240)
+        enable_avoid: Add collision avoidance between agents (default: False)
+
+    Returns:
+        Dict with motion_path_path, evaluate_path, avoid_path (if enabled), clip_name
+
+    Examples:
+        setup_motion_path("/obj/crowd_sim", "/obj/agent_setup/cache",
+                         clip_name="walk", end_frame=500)
+    """
+    return tools.setup_motion_path(
+        parent_path, agent_setup_path, clip_name, clip_speed, start_frame,
+        end_frame, enable_avoid, HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def add_steer_weight(
+    dopnet_path: str,
+    behavior_name: str,
+    weight: float,
+) -> Dict[str, Any]:
+    """
+    Set the steering weight on an existing POP Steer behavior node.
+
+    Controls behavior influence relative to other steering behaviors.
+    The Crowd Solver normalizes all weights automatically.
+
+    Args:
+        dopnet_path: Path to the DOP network
+        behavior_name: Name of the POP Steer behavior node
+        weight: Weight value (0.0-10.0). Higher = more influence.
+
+    Returns:
+        Dict with behavior_path, weight, behavior_type
+
+    Examples:
+        add_steer_weight("/obj/crowd_sim_dopnet", "steer_wander", 0.5)
+    """
+    return tools.add_steer_weight(
+        dopnet_path, behavior_name, weight, HOUDINI_HOST, HOUDINI_PORT
+    )
+
+
+@mcp.tool()
+def configure_foot_planting(
+    agent_setup_path: str,
+    ankle_joint: str = "LeftAnkle",
+    toe_joint: str = "LeftToe",
+    upper_leg_joint: str = "LeftUpperLeg",
+    knee_joint: str = "LeftKnee",
+    enable_foot_locking: bool = True,
+    adjust_hips: bool = True,
+) -> Dict[str, Any]:
+    """
+    Configure foot planting for crowd terrain adaptation.
+
+    Sets up Agent Prep SOP's lower limb definitions for natural foot-ground contact.
+    Prevents foot skating and floating on terrain.
+
+    Args:
+        agent_setup_path: Path to the agent setup geometry container
+        ankle_joint: Ankle joint name (default: "LeftAnkle")
+        toe_joint: Toe joint name (default: "LeftToe")
+        upper_leg_joint: Upper leg joint name (default: "LeftUpperLeg")
+        knee_joint: Knee joint name (default: "LeftKnee")
+        enable_foot_locking: Enable foot locking (default: True)
+        adjust_hips: Enable hip height adjustment (default: True)
+
+    Returns:
+        Dict with prep_path, joints_configured, foot_locking, hip_adjustment
+
+    Examples:
+        configure_foot_planting("/obj/soldier_agent_setup")
+    """
+    return tools.configure_foot_planting(
+        agent_setup_path, ankle_joint, toe_joint, upper_leg_joint, knee_joint,
+        enable_foot_locking, adjust_hips, HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
 def run_server(transport: str = "http", port: int = 3055) -> None:
     """Run the MCP server."""
     logger.info(f"Starting Houdini MCP Server on {transport}://0.0.0.0:{port}")

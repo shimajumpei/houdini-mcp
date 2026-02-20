@@ -64,6 +64,14 @@ from .crowd import (
     setup_crowd_terrain,
     get_crowd_info,
     validate_crowd_setup,
+    setup_crowd_formation,
+    add_crowd_clip_transition_graph,
+    add_crowd_layer,
+    setup_crowd_ragdoll,
+    add_crowd_look_at,
+    setup_motion_path,
+    add_steer_weight,
+    configure_foot_planting,
 )
 
 # Import shared utilities from _common (needed by some tests)
@@ -158,4 +166,12 @@ __all__ = [
     "setup_crowd_terrain",
     "get_crowd_info",
     "validate_crowd_setup",
+    "setup_crowd_formation",
+    "add_crowd_clip_transition_graph",
+    "add_crowd_layer",
+    "setup_crowd_ragdoll",
+    "add_crowd_look_at",
+    "setup_motion_path",
+    "add_steer_weight",
+    "configure_foot_planting",
 ]

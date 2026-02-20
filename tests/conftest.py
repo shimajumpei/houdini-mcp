@@ -183,6 +183,59 @@ class MockHouNode:
                     "metallic": 0.0,
                 }
             )
+        elif node_type == "object_merge":
+            params.update({"objpath1": "", "xformtype": 0})
+        elif node_type == "grid":
+            params.update({"sizex": 10.0, "sizey": 10.0, "rows": 10, "cols": 10})
+        elif node_type == "scatter":
+            params.update({"npts": 100})
+        elif node_type == "crowdsource":
+            params.update({
+                "initialstate": "idle", "layout": 0,
+                "rows": 5, "columns": 5, "spacing": 2.0,
+            })
+        elif node_type == "crowdobject":
+            params.update({"soppath": ""})
+        elif node_type in ("crowdsolver", "crowdsolver::3.0"):
+            params.update({"substeps": 1})
+        elif node_type == "crowdstate":
+            params.update({
+                "clipname": "", "locomotiontype": 0, "playbackspeed": 1.0,
+                "randomizeclips": 0, "speedvariance": 0.0, "ragdoll": 0,
+            })
+        elif node_type == "crowdtrigger":
+            params.update({"triggerlogic": ""})
+        elif node_type == "crowdtransition":
+            params.update({"inputstate": "", "outputstate": ""})
+        elif node_type == "agentcliptransitiongraph":
+            params.update({
+                "blendframes": 10, "computetransitiongraph": 0, "numclips": 0,
+            })
+        elif node_type == "agentlayer":
+            params.update({"layername": "", "transformname": ""})
+        elif node_type == "crowdassignlayers":
+            params.update({"numlayers": 0})
+        elif node_type == "agentcollisionlayer":
+            params.update({"shapetype": 2})
+        elif node_type == "agentconfigurejoints":
+            params.update({"createlimits": 0})
+        elif node_type == "agentlookat":
+            params.update({
+                "targetposx": 0.0, "targetposy": 0.0, "targetposz": 0.0,
+                "targetpath": "", "headjoint": "Head",
+                "eyeoffsetx": 0.0, "eyeoffsety": 0.0, "eyeoffsetz": 0.0,
+            })
+        elif node_type == "crowdmotionpath":
+            params.update({
+                "clipname": "walk", "clipspeed": 1.0,
+                "startframe": 1, "endframe": 240,
+            })
+        elif node_type in ("popsteerwander", "popsteerseek", "popsteeravoid",
+                          "popsteerfollowpath", "popsteerseparate",
+                          "popsteercohesion", "popsteeralign", "popsteerobstacle"):
+            params.update({"weight": 1.0, "maxforce": 1.0, "maxspeed": 2.0})
+        elif node_type == "agentterrainadaptation":
+            params.update({"enablefootlocking": 0})
 
         new_node = MockHouNode(path=new_path, name=new_name, node_type=node_type, params=params)
         new_node._parent = self  # Set parent reference
@@ -328,6 +381,13 @@ class MockHouNode:
     def setFirstInput(self, node: Optional["MockHouNode"]) -> None:
         """Set the first input connection (convenience method)."""
         self.setInput(0, node)
+
+    def node(self, name: str) -> Optional["MockHouNode"]:
+        """Find a child node by name (relative path lookup)."""
+        for child in self._children:
+            if child._name == name:
+                return child
+        return None
 
 
 class MockRpycConnection:

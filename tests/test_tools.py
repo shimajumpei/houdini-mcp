@@ -3186,3 +3186,822 @@ class TestHandleConnectionErrorsDecorator:
             result = broken_pipe_function()
 
         assert result["operation"] == "custom_operation_name"
+
+
+# =============================================================================
+# Crowd Tools Tests
+# =============================================================================
+
+
+class TestSetupCrowdAgent:
+    """Tests for the setup_crowd_agent function."""
+
+    def test_basic_agent_setup(self, mock_connection):
+        """Test creating a basic agent setup chain."""
+        from houdini_mcp.tools import setup_crowd_agent
+
+        result = setup_crowd_agent("soldier", host="localhost", port=18811)
+
+        assert result["status"] == "success"
+        assert "geo_path" in result
+        assert "agent_path" in result
+        assert "prep_path" in result
+        assert "cache_path" in result
+        assert result["node_count"] == 4  # geo + agent + prep + cache
+
+    def test_agent_with_clips(self, mock_connection):
+        """Test agent setup with clip paths."""
+        from houdini_mcp.tools import setup_crowd_agent
+
+        result = setup_crowd_agent(
+            "civilian",
+            clip_paths=["/path/to/walk.bclip", "/path/to/run.bclip"],
+            host="localhost",
+            port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "clip_path" in result
+        assert result["node_count"] == 5  # geo + agent + clip + prep + cache
+
+    def test_agent_invalid_parent(self, mock_connection):
+        """Test agent setup with invalid parent path."""
+        from houdini_mcp.tools import setup_crowd_agent
+
+        result = setup_crowd_agent("test", parent_path="/nonexistent", host="localhost", port=18811)
+
+        assert result["status"] == "error"
+
+
+class TestSetupCrowdSource:
+    """Tests for the setup_crowd_source function."""
+
+    def test_scatter_source(self, mock_connection):
+        """Test creating a scatter-based crowd source."""
+        from houdini_mcp.tools import setup_crowd_agent, setup_crowd_source
+
+        # First create agent
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        assert agent_result["status"] == "success"
+
+        # Register the cache node in mock
+        cache_path = agent_result["cache_path"]
+        cache_node = MockHouNode(path=cache_path, name="soldier_cache", node_type="agentdefinitioncache")
+        mock_connection.add_node(cache_node)
+
+        result = setup_crowd_source(
+            "/obj/crowd_sim", cache_path, source_type="scatter", count=200,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "source_path" in result
+
+    def test_source_missing_agent(self, mock_connection):
+        """Test crowd source with non-existent agent path."""
+        from houdini_mcp.tools import setup_crowd_source
+
+        result = setup_crowd_source(
+            "/obj/crowd_sim", "/obj/nonexistent/cache",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+
+class TestSetupCrowdDop:
+    """Tests for the setup_crowd_dop function."""
+
+    def test_basic_dop_setup(self, mock_connection):
+        """Test creating a basic DOP network."""
+        from houdini_mcp.tools import setup_crowd_dop
+
+        result = setup_crowd_dop(host="localhost", port=18811)
+
+        assert result["status"] == "success"
+        assert "dopnet_path" in result
+        assert "crowdobject_path" in result
+        assert "crowdsolver_path" in result
+        assert "groundplane_path" in result
+        assert "gravity_path" in result
+
+
+class TestAddCrowdBehavior:
+    """Tests for the add_crowd_behavior function."""
+
+    def test_add_wander_behavior(self, mock_connection):
+        """Test adding a wander behavior."""
+        from houdini_mcp.tools import setup_crowd_dop, add_crowd_behavior
+
+        dop_result = setup_crowd_dop(host="localhost", port=18811)
+        dopnet_path = dop_result["dopnet_path"]
+
+        # Register dopnet in mock
+        dopnet = MockHouNode(path=dopnet_path, name="crowd_sim_dopnet", node_type="dopnet")
+        solver = MockHouNode(
+            path=f"{dopnet_path}/crowdsolver1", name="crowdsolver1", node_type="crowdsolver"
+        )
+        dopnet._children = [solver]
+        mock_connection.add_node(dopnet)
+
+        result = add_crowd_behavior(dopnet_path, "wander", host="localhost", port=18811)
+
+        assert result["status"] == "success"
+        assert result["behavior_type"] == "wander"
+
+    def test_invalid_behavior_type(self, mock_connection):
+        """Test adding an invalid behavior type."""
+        from houdini_mcp.tools import add_crowd_behavior
+
+        result = add_crowd_behavior("/obj/dopnet", "invalid_type", host="localhost", port=18811)
+
+        assert result["status"] == "error"
+        assert "available_types" in result
+
+
+class TestAddCrowdState:
+    """Tests for the add_crowd_state function."""
+
+    def test_add_idle_state(self, mock_connection):
+        """Test adding an idle state."""
+        from houdini_mcp.tools import setup_crowd_dop, add_crowd_state
+
+        dop_result = setup_crowd_dop(host="localhost", port=18811)
+        dopnet_path = dop_result["dopnet_path"]
+
+        # Register dopnet with solver in mock
+        dopnet = MockHouNode(path=dopnet_path, name="crowd_sim_dopnet", node_type="dopnet")
+        solver = MockHouNode(
+            path=f"{dopnet_path}/crowdsolver1", name="crowdsolver1", node_type="crowdsolver"
+        )
+        dopnet._children = [solver]
+        mock_connection.add_node(dopnet)
+
+        result = add_crowd_state(dopnet_path, "idle", host="localhost", port=18811)
+
+        assert result["status"] == "success"
+        assert result["state_name"] == "idle"
+        assert result["clip_name"] == "idle"
+
+    def test_add_locomotive_state(self, mock_connection):
+        """Test adding a locomotive state."""
+        from houdini_mcp.tools import setup_crowd_dop, add_crowd_state
+
+        dop_result = setup_crowd_dop(host="localhost", port=18811)
+        dopnet_path = dop_result["dopnet_path"]
+
+        dopnet = MockHouNode(path=dopnet_path, name="crowd_sim_dopnet", node_type="dopnet")
+        solver = MockHouNode(
+            path=f"{dopnet_path}/crowdsolver1", name="crowdsolver1", node_type="crowdsolver"
+        )
+        dopnet._children = [solver]
+        mock_connection.add_node(dopnet)
+
+        result = add_crowd_state(
+            dopnet_path, "walk", locomotion=True, variance=0.1,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert result["locomotion"] is True
+
+
+class TestAddCrowdTransition:
+    """Tests for the add_crowd_transition function."""
+
+    def test_add_time_transition(self, mock_connection):
+        """Test adding a time-based transition."""
+        from houdini_mcp.tools import setup_crowd_dop, add_crowd_transition
+
+        dop_result = setup_crowd_dop(host="localhost", port=18811)
+        dopnet_path = dop_result["dopnet_path"]
+
+        dopnet = MockHouNode(path=dopnet_path, name="crowd_sim_dopnet", node_type="dopnet")
+        solver = MockHouNode(
+            path=f"{dopnet_path}/crowdsolver1", name="crowdsolver1", node_type="crowdsolver"
+        )
+        dopnet._children = [solver]
+        mock_connection.add_node(dopnet)
+
+        result = add_crowd_transition(
+            dopnet_path, "idle", "walk", "time",
+            trigger_settings={"mintime": 2.0, "maxtime": 5.0},
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert result["from_state"] == "idle"
+        assert result["to_state"] == "walk"
+        assert result["trigger_type"] == "time"
+
+    def test_invalid_trigger_type(self, mock_connection):
+        """Test with invalid trigger type."""
+        from houdini_mcp.tools import add_crowd_transition
+
+        result = add_crowd_transition(
+            "/obj/dopnet", "idle", "walk", "invalid_trigger",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+        assert "available_types" in result
+
+
+class TestSetupCrowdTerrain:
+    """Tests for the setup_crowd_terrain function."""
+
+    def test_default_terrain(self, mock_connection):
+        """Test creating default flat terrain."""
+        from houdini_mcp.tools import setup_crowd_terrain
+
+        # Create a parent geo node
+        obj = mock_connection.node("/obj")
+        parent = obj.createNode("geo", "crowd_sim")
+        mock_connection.add_node(parent)
+
+        result = setup_crowd_terrain(parent.path(), host="localhost", port=18811)
+
+        assert result["status"] == "success"
+        assert "terrain_path" in result
+
+
+class TestGetCrowdInfo:
+    """Tests for the get_crowd_info function."""
+
+    def test_empty_scene(self, mock_connection):
+        """Test scanning empty scene."""
+        from houdini_mcp.tools import get_crowd_info
+
+        result = get_crowd_info(host="localhost", port=18811)
+
+        assert result["status"] == "success"
+        assert result["total_crowd_nodes"] == 0
+
+    def test_detects_new_node_types(self, mock_connection):
+        """Test that get_crowd_info detects new Phase 4 node types."""
+        from houdini_mcp.tools import get_crowd_info
+
+        obj = mock_connection.node("/obj")
+        geo = obj.createNode("geo", "agent_setup")
+        mock_connection.add_node(geo)
+
+        # Add new node types
+        layer = geo.createNode("agentlayer", "layer_sword")
+        transition_graph = geo.createNode("agentcliptransitiongraph", "clip_graph")
+        collision = geo.createNode("agentcollisionlayer", "collision")
+
+        result = get_crowd_info(host="localhost", port=18811)
+
+        assert result["status"] == "success"
+        assert len(result["layers"]) >= 1
+        assert len(result["transition_graphs"]) >= 1
+        assert len(result["ragdoll_nodes"]) >= 1
+
+
+class TestValidateCrowdSetup:
+    """Tests for the validate_crowd_setup function."""
+
+    def test_empty_scene_validation(self, mock_connection):
+        """Test validating empty scene."""
+        from houdini_mcp.tools import validate_crowd_setup
+
+        result = validate_crowd_setup(host="localhost", port=18811)
+
+        assert result["status"] == "success"
+        # Empty scene should have critical issues (no agents)
+        assert result["issue_counts"]["critical"] >= 1
+
+
+# =============================================================================
+# Phase 4 — New Crowd Tools Tests
+# =============================================================================
+
+
+class TestSetupCrowdFormation:
+    """Tests for the setup_crowd_formation function."""
+
+    def test_basic_formation(self, mock_connection):
+        """Test creating a basic formation."""
+        from houdini_mcp.tools import setup_crowd_agent, setup_crowd_formation
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        cache_path = agent_result["cache_path"]
+        cache_node = MockHouNode(path=cache_path, name="soldier_cache", node_type="agentdefinitioncache")
+        mock_connection.add_node(cache_node)
+
+        result = setup_crowd_formation(
+            "/obj/crowd_sim", cache_path, rows=10, columns=10, spacing=3.0,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert result["agent_count"] == 100
+        assert result["formation"]["rows"] == 10
+        assert result["formation"]["columns"] == 10
+        assert result["formation"]["spacing"] == 3.0
+        assert "source_path" in result
+        assert "geo_path" in result
+
+    def test_formation_custom_state(self, mock_connection):
+        """Test formation with custom initial state."""
+        from houdini_mcp.tools import setup_crowd_agent, setup_crowd_formation
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        cache_path = agent_result["cache_path"]
+        mock_connection.add_node(
+            MockHouNode(path=cache_path, name="cache", node_type="agentdefinitioncache")
+        )
+
+        result = setup_crowd_formation(
+            "/obj/crowd_sim", cache_path, rows=3, columns=4,
+            initial_state="march", host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert result["agent_count"] == 12
+
+    def test_formation_missing_agent(self, mock_connection):
+        """Test formation with non-existent agent setup."""
+        from houdini_mcp.tools import setup_crowd_formation
+
+        result = setup_crowd_formation(
+            "/obj/crowd_sim", "/obj/nonexistent/cache",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+
+class TestAddCrowdClipTransitionGraph:
+    """Tests for the add_crowd_clip_transition_graph function."""
+
+    def test_basic_transition_graph(self, mock_connection):
+        """Test creating a basic clip transition graph."""
+        from houdini_mcp.tools import setup_crowd_agent, add_crowd_clip_transition_graph
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        geo_path = agent_result["geo_path"]
+        cache_path = agent_result["cache_path"]
+        geo_node = MockHouNode(path=geo_path, name="soldier_agent_setup", node_type="geo")
+        cache_node = MockHouNode(path=cache_path, name="soldier_cache", node_type="agentdefinitioncache")
+        mock_connection.add_node(geo_node)
+        mock_connection.add_node(cache_node)
+
+        result = add_crowd_clip_transition_graph(
+            geo_path, cache_path, blend_frames=15,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "graph_path" in result
+        assert "cache_path" in result
+        assert result["blend_frames"] == 15
+        assert result["auto_compute"] is True
+
+    def test_transition_graph_with_clips(self, mock_connection):
+        """Test transition graph with specific clip names."""
+        from houdini_mcp.tools import setup_crowd_agent, add_crowd_clip_transition_graph
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        geo_path = agent_result["geo_path"]
+        cache_path = agent_result["cache_path"]
+        mock_connection.add_node(
+            MockHouNode(path=geo_path, name="soldier_agent_setup", node_type="geo")
+        )
+        mock_connection.add_node(
+            MockHouNode(path=cache_path, name="cache", node_type="agentdefinitioncache")
+        )
+
+        result = add_crowd_clip_transition_graph(
+            geo_path, cache_path, clip_names=["walk", "run", "idle"],
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+
+    def test_transition_graph_missing_parent(self, mock_connection):
+        """Test transition graph with missing parent."""
+        from houdini_mcp.tools import add_crowd_clip_transition_graph
+
+        result = add_crowd_clip_transition_graph(
+            "/obj/nonexistent", "/obj/nonexistent/cache",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+
+class TestAddCrowdLayer:
+    """Tests for the add_crowd_layer function."""
+
+    def test_basic_layer(self, mock_connection):
+        """Test creating a basic agent layer."""
+        from houdini_mcp.tools import setup_crowd_agent, add_crowd_layer
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        geo_path = agent_result["geo_path"]
+        cache_path = agent_result["cache_path"]
+        mock_connection.add_node(
+            MockHouNode(path=geo_path, name="soldier_agent_setup", node_type="geo")
+        )
+        mock_connection.add_node(
+            MockHouNode(path=cache_path, name="cache", node_type="agentdefinitioncache")
+        )
+
+        result = add_crowd_layer(
+            geo_path, cache_path, "sword",
+            transform_name="RightHand",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert result["layer_name"] == "sword"
+        assert "layer_path" in result
+        assert "cache_path" in result
+
+    def test_layer_with_assignments(self, mock_connection):
+        """Test layer with random assignments."""
+        from houdini_mcp.tools import setup_crowd_agent, add_crowd_layer
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        geo_path = agent_result["geo_path"]
+        cache_path = agent_result["cache_path"]
+        mock_connection.add_node(
+            MockHouNode(path=geo_path, name="setup", node_type="geo")
+        )
+        mock_connection.add_node(
+            MockHouNode(path=cache_path, name="cache", node_type="agentdefinitioncache")
+        )
+
+        result = add_crowd_layer(
+            geo_path, cache_path, "helmet",
+            layer_assignments=[
+                {"name": "helmet_a", "weight": 0.5},
+                {"name": "helmet_b", "weight": 0.3},
+                {"name": "no_helmet", "weight": 0.2},
+            ],
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "assign_path" in result
+
+    def test_layer_missing_agent(self, mock_connection):
+        """Test layer with missing agent setup."""
+        from houdini_mcp.tools import add_crowd_layer
+
+        obj = mock_connection.node("/obj")
+        geo = obj.createNode("geo", "test_geo")
+        mock_connection.add_node(geo)
+
+        result = add_crowd_layer(
+            geo.path(), "/obj/nonexistent/cache", "sword",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+
+class TestSetupCrowdRagdoll:
+    """Tests for the setup_crowd_ragdoll function."""
+
+    def test_basic_ragdoll(self, mock_connection):
+        """Test basic ragdoll setup."""
+        from houdini_mcp.tools import setup_crowd_agent, setup_crowd_dop, setup_crowd_ragdoll
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        geo_path = agent_result["geo_path"]
+
+        dop_result = setup_crowd_dop(host="localhost", port=18811)
+        dopnet_path = dop_result["dopnet_path"]
+
+        # Register agent setup geo with agentdefinitioncache child
+        geo_node = MockHouNode(path=geo_path, name="soldier_agent_setup", node_type="geo")
+        cache = MockHouNode(
+            path=f"{geo_path}/soldier_cache", name="soldier_cache",
+            node_type="agentdefinitioncache",
+        )
+        geo_node._children = [cache]
+        mock_connection.add_node(geo_node)
+
+        # Register dopnet with solver
+        dopnet = MockHouNode(path=dopnet_path, name="crowd_sim_dopnet", node_type="dopnet")
+        solver = MockHouNode(
+            path=f"{dopnet_path}/crowdsolver1", name="crowdsolver1",
+            node_type="crowdsolver",
+        )
+        dopnet._children = [solver]
+        mock_connection.add_node(dopnet)
+
+        result = setup_crowd_ragdoll(
+            geo_path, dopnet_path,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "collision_layer_path" in result
+        assert "configure_joints_path" in result
+        assert "multisolver_path" in result
+        assert "bullet_solver_path" in result
+
+    def test_ragdoll_no_joints(self, mock_connection):
+        """Test ragdoll without joint configuration."""
+        from houdini_mcp.tools import setup_crowd_agent, setup_crowd_dop, setup_crowd_ragdoll
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        geo_path = agent_result["geo_path"]
+
+        dop_result = setup_crowd_dop(host="localhost", port=18811)
+        dopnet_path = dop_result["dopnet_path"]
+
+        geo_node = MockHouNode(path=geo_path, name="setup", node_type="geo")
+        cache = MockHouNode(
+            path=f"{geo_path}/cache", name="cache", node_type="agentdefinitioncache",
+        )
+        geo_node._children = [cache]
+        mock_connection.add_node(geo_node)
+
+        dopnet = MockHouNode(path=dopnet_path, name="dopnet", node_type="dopnet")
+        solver = MockHouNode(
+            path=f"{dopnet_path}/solver", name="solver", node_type="crowdsolver",
+        )
+        dopnet._children = [solver]
+        mock_connection.add_node(dopnet)
+
+        result = setup_crowd_ragdoll(
+            geo_path, dopnet_path, create_joints=False,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "collision_layer_path" in result
+        assert "configure_joints_path" not in result
+
+    def test_ragdoll_missing_agent(self, mock_connection):
+        """Test ragdoll with missing agent setup."""
+        from houdini_mcp.tools import setup_crowd_ragdoll
+
+        result = setup_crowd_ragdoll(
+            "/obj/nonexistent", "/obj/dopnet",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+
+class TestAddCrowdLookAt:
+    """Tests for the add_crowd_look_at function."""
+
+    def test_lookat_with_position(self, mock_connection):
+        """Test look at with target position."""
+        from houdini_mcp.tools import add_crowd_look_at
+
+        dopnet = MockHouNode(path="/obj/dopnet", name="dopnet", node_type="dopnet")
+        solver = MockHouNode(
+            path="/obj/dopnet/crowdsolver1", name="crowdsolver1", node_type="crowdsolver",
+        )
+        dopnet._children = [solver]
+        mock_connection.add_node(dopnet)
+
+        result = add_crowd_look_at(
+            "/obj/dopnet", target_position=[10, 2, 0],
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "lookat_path" in result
+        assert "apply_path" in result
+        assert result["target"] == [10, 2, 0]
+
+    def test_lookat_with_node_path(self, mock_connection):
+        """Test look at with target node path."""
+        from houdini_mcp.tools import add_crowd_look_at
+
+        dopnet = MockHouNode(path="/obj/dopnet", name="dopnet", node_type="dopnet")
+        solver = MockHouNode(
+            path="/obj/dopnet/crowdsolver1", name="crowdsolver1", node_type="crowdsolver",
+        )
+        dopnet._children = [solver]
+        mock_connection.add_node(dopnet)
+
+        result = add_crowd_look_at(
+            "/obj/dopnet", target_node_path="/obj/target_null",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert result["target"] == "/obj/target_null"
+
+    def test_lookat_missing_dopnet(self, mock_connection):
+        """Test look at with missing dopnet."""
+        from houdini_mcp.tools import add_crowd_look_at
+
+        result = add_crowd_look_at(
+            "/obj/nonexistent", target_position=[0, 0, 0],
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+
+class TestSetupMotionPath:
+    """Tests for the setup_motion_path function."""
+
+    def test_basic_motion_path(self, mock_connection):
+        """Test creating a basic motion path."""
+        from houdini_mcp.tools import setup_motion_path
+
+        parent = MockHouNode(path="/obj/crowd_sim", name="crowd_sim", node_type="geo")
+        mock_connection.add_node(parent)
+        agent = MockHouNode(path="/obj/agent/cache", name="cache", node_type="agentdefinitioncache")
+        mock_connection.add_node(agent)
+
+        result = setup_motion_path(
+            "/obj/crowd_sim", "/obj/agent/cache",
+            clip_name="walk", end_frame=500,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "motion_path_path" in result
+        assert "evaluate_path" in result
+        assert result["clip_name"] == "walk"
+
+    def test_motion_path_with_avoid(self, mock_connection):
+        """Test motion path with collision avoidance."""
+        from houdini_mcp.tools import setup_motion_path
+
+        parent = MockHouNode(path="/obj/crowd_sim", name="crowd_sim", node_type="geo")
+        mock_connection.add_node(parent)
+        agent = MockHouNode(path="/obj/agent/cache", name="cache", node_type="agentdefinitioncache")
+        mock_connection.add_node(agent)
+
+        result = setup_motion_path(
+            "/obj/crowd_sim", "/obj/agent/cache",
+            enable_avoid=True,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "avoid_path" in result
+
+    def test_motion_path_missing_parent(self, mock_connection):
+        """Test motion path with missing parent."""
+        from houdini_mcp.tools import setup_motion_path
+
+        result = setup_motion_path(
+            "/obj/nonexistent", "/obj/agent/cache",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+
+class TestAddSteerWeight:
+    """Tests for the add_steer_weight function."""
+
+    def test_set_weight(self, mock_connection):
+        """Test setting behavior weight."""
+        from houdini_mcp.tools import add_steer_weight
+
+        dopnet = MockHouNode(path="/obj/dopnet", name="dopnet", node_type="dopnet")
+        behavior = MockHouNode(
+            path="/obj/dopnet/steer_wander", name="steer_wander",
+            node_type="popsteerwander",
+            params={"weight": 1.0, "tx": 0.0, "ty": 0.0, "tz": 0.0},
+        )
+        dopnet._children = [behavior]
+        mock_connection.add_node(dopnet)
+
+        result = add_steer_weight(
+            "/obj/dopnet", "steer_wander", 0.5,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert result["weight"] == 0.5
+        assert result["behavior_type"] == "popsteerwander"
+
+    def test_weight_invalid_node(self, mock_connection):
+        """Test setting weight on non-steer node."""
+        from houdini_mcp.tools import add_steer_weight
+
+        dopnet = MockHouNode(path="/obj/dopnet", name="dopnet", node_type="dopnet")
+        non_steer = MockHouNode(
+            path="/obj/dopnet/gravity1", name="gravity1",
+            node_type="gravity",
+        )
+        dopnet._children = [non_steer]
+        mock_connection.add_node(dopnet)
+
+        result = add_steer_weight(
+            "/obj/dopnet", "gravity1", 0.5,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+    def test_weight_missing_behavior(self, mock_connection):
+        """Test setting weight on non-existent node."""
+        from houdini_mcp.tools import add_steer_weight
+
+        dopnet = MockHouNode(path="/obj/dopnet", name="dopnet", node_type="dopnet")
+        dopnet._children = []
+        mock_connection.add_node(dopnet)
+
+        result = add_steer_weight(
+            "/obj/dopnet", "nonexistent", 0.5,
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+
+class TestConfigureFootPlanting:
+    """Tests for the configure_foot_planting function."""
+
+    def test_basic_foot_planting(self, mock_connection):
+        """Test basic foot planting configuration."""
+        from houdini_mcp.tools import setup_crowd_agent, configure_foot_planting
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        geo_path = agent_result["geo_path"]
+
+        # Register agent setup with agentprep child
+        geo_node = MockHouNode(path=geo_path, name="soldier_agent_setup", node_type="geo")
+        prep = MockHouNode(
+            path=f"{geo_path}/soldier_prep", name="soldier_prep",
+            node_type="agentprep",
+            params={
+                "upperleg": "", "knee": "", "ankle": "", "toe": "",
+                "enablefootlocking": 0, "adjusthips": 0,
+                "tx": 0.0, "ty": 0.0, "tz": 0.0,
+            },
+        )
+        geo_node._children = [prep]
+        mock_connection.add_node(geo_node)
+
+        result = configure_foot_planting(
+            geo_path, host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert "prep_path" in result
+        assert result["foot_locking"] is True
+        assert result["hip_adjustment"] is True
+        assert result["joints_configured"]["ankle"] == "LeftAnkle"
+
+    def test_foot_planting_custom_joints(self, mock_connection):
+        """Test foot planting with custom joint names."""
+        from houdini_mcp.tools import setup_crowd_agent, configure_foot_planting
+
+        agent_result = setup_crowd_agent("soldier", host="localhost", port=18811)
+        geo_path = agent_result["geo_path"]
+
+        geo_node = MockHouNode(path=geo_path, name="setup", node_type="geo")
+        prep = MockHouNode(
+            path=f"{geo_path}/prep", name="prep", node_type="agentprep",
+            params={
+                "upperleg": "", "knee": "", "ankle": "", "toe": "",
+                "enablefootlocking": 0, "adjusthips": 0,
+                "tx": 0.0, "ty": 0.0, "tz": 0.0,
+            },
+        )
+        geo_node._children = [prep]
+        mock_connection.add_node(geo_node)
+
+        result = configure_foot_planting(
+            geo_path,
+            ankle_joint="R_Ankle", toe_joint="R_Toe",
+            upper_leg_joint="R_UpperLeg", knee_joint="R_Knee",
+            host="localhost", port=18811,
+        )
+
+        assert result["status"] == "success"
+        assert result["joints_configured"]["ankle"] == "R_Ankle"
+        assert result["joints_configured"]["toe"] == "R_Toe"
+
+    def test_foot_planting_missing_agent(self, mock_connection):
+        """Test foot planting with missing agent setup."""
+        from houdini_mcp.tools import configure_foot_planting
+
+        result = configure_foot_planting(
+            "/obj/nonexistent", host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+
+    def test_foot_planting_no_prep_node(self, mock_connection):
+        """Test foot planting when no agentprep node exists."""
+        from houdini_mcp.tools import configure_foot_planting
+
+        obj = mock_connection.node("/obj")
+        geo = obj.createNode("geo", "empty_agent_setup")
+        mock_connection.add_node(geo)
+
+        result = configure_foot_planting(
+            geo.path(), host="localhost", port=18811,
+        )
+
+        assert result["status"] == "error"
+        assert "agentprep" in result["message"]

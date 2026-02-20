@@ -1037,6 +1037,11 @@ def get_crowd_info(
         "crowdsource", "crowdobject", "crowdsolver", "crowdtrigger",
         "crowdtransition", "crowdstate",
         "agentterrainadaptation", "agentterrainprojection",
+        "agentcliptransitiongraph", "agentlayer", "crowdassignlayers",
+        "agentcollisionlayer", "agentconfigurejoints",
+        "agentlookat", "agentlookatapply",
+        "crowdmotionpath", "crowdmotionpathavoid", "crowdmotionpathevaluate",
+        "multisolver", "bulletrbdsolver",
     }
     steer_prefix = "popsteer"
 
@@ -1047,6 +1052,11 @@ def get_crowd_info(
     states = []
     transitions = []
     triggers = []
+    layers = []
+    transition_graphs = []
+    ragdoll_nodes = []
+    motion_paths = []
+    lookat_nodes = []
     other_crowd_nodes = []
 
     def _classify_node(path, node_type, node=None):
@@ -1106,6 +1116,16 @@ def get_crowd_info(
                     except Exception:
                         pass
             transitions.append(trans_info)
+        elif node_type.startswith("agentcliptransitiongraph"):
+            transition_graphs.append({"path": path, "name": name, "type": node_type})
+        elif node_type.startswith("agentlayer") or node_type.startswith("crowdassignlayers"):
+            layers.append({"path": path, "name": name, "type": node_type})
+        elif node_type.startswith("agentcollisionlayer") or node_type.startswith("agentconfigurejoints"):
+            ragdoll_nodes.append({"path": path, "name": name, "type": node_type})
+        elif node_type.startswith("agentlookat"):
+            lookat_nodes.append({"path": path, "name": name, "type": node_type})
+        elif node_type.startswith("crowdmotionpath"):
+            motion_paths.append({"path": path, "name": name, "type": node_type})
         elif any(node_type.startswith(kw) for kw in crowd_keywords):
             other_crowd_nodes.append({"path": path, "name": name, "type": node_type})
 
@@ -1148,6 +1168,8 @@ def get_crowd_info(
     total = (
         len(agent_definitions) + len(crowd_sources) + len(dop_networks)
         + len(behaviors) + len(states) + len(transitions) + len(triggers)
+        + len(layers) + len(transition_graphs) + len(ragdoll_nodes)
+        + len(motion_paths) + len(lookat_nodes)
         + len(other_crowd_nodes)
     )
 
@@ -1161,6 +1183,11 @@ def get_crowd_info(
         "states": states,
         "transitions": transitions,
         "triggers": triggers,
+        "layers": layers,
+        "transition_graphs": transition_graphs,
+        "ragdoll_nodes": ragdoll_nodes,
+        "motion_paths": motion_paths,
+        "lookat_nodes": lookat_nodes,
         "other_crowd_nodes": other_crowd_nodes,
         "total_crowd_nodes": total,
     }
@@ -1340,6 +1367,34 @@ def validate_crowd_setup(
             "fix_hint": "Use add_crowd_transition() to add state changes (e.g., idle -> walk)",
         })
 
+    # Check 8: Clip Transition Graph
+    if info.get("states") and len(info["states"]) > 1 and not info.get("transition_graphs"):
+        issues.append({
+            "severity": "info",
+            "category": "clip_transition",
+            "message": "Multiple states found but no Clip Transition Graph. "
+            "Transitions may appear abrupt without blend curves.",
+            "fix_hint": "Use add_crowd_clip_transition_graph() for smooth animation blending",
+        })
+
+    # Check 9: Layers
+    if info["agent_definitions"] and not info.get("layers"):
+        issues.append({
+            "severity": "info",
+            "category": "diversity",
+            "message": "No agent layers found. All agents will look identical.",
+            "fix_hint": "Use add_crowd_layer() to add visual diversity (weapons, clothing)",
+        })
+
+    # Check 10: Ragdoll setup
+    if info["dop_networks"] and not info.get("ragdoll_nodes"):
+        issues.append({
+            "severity": "info",
+            "category": "ragdoll",
+            "message": "No ragdoll setup found. Agents cannot react to physical impacts.",
+            "fix_hint": "Use setup_crowd_ragdoll() to add ragdoll physics capability",
+        })
+
     # Check for cook errors on crowd nodes
     error_nodes = []
     if root:
@@ -1397,4 +1452,982 @@ def validate_crowd_setup(
         },
         "summary": summary,
         "crowd_info": info,
+    }
+
+
+# =============================================================================
+# Formation Placement
+# =============================================================================
+
+
+@handle_connection_errors("setup_crowd_formation")
+def setup_crowd_formation(
+    parent_path: str,
+    agent_setup_path: str,
+    rows: int = 5,
+    columns: int = 5,
+    spacing: float = 2.0,
+    initial_state: str = "idle",
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Create formation-based crowd placement.
+
+    Sets up agents in a structured grid formation instead of random scattering.
+    Uses the Crowd Source SOP's formation layout mode with configurable
+    rows, columns, and spacing.
+
+    Args:
+        parent_path: Path to the geometry container (e.g., "/obj/crowd_sim")
+        agent_setup_path: Path to the agent definition cache node
+        rows: Number of rows in the formation (default: 5)
+        columns: Number of columns in the formation (default: 5)
+        spacing: Distance between agents in the formation (default: 2.0)
+        initial_state: Initial crowd state name (default: "idle")
+        host: Houdini RPC server hostname
+        port: Houdini RPC server port
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - geo_path: Path to the geometry container
+        - source_path: Path to the crowdsource node
+        - agent_count: Total number of agents (rows * columns)
+        - formation: Dict with rows, columns, spacing
+
+    Examples:
+        setup_crowd_formation("/obj/crowd_sim",
+                             "/obj/soldier_agent_setup/soldier_cache",
+                             rows=10, columns=10, spacing=3.0)
+        setup_crowd_formation("/obj/crowd_sim", agent_path,
+                             rows=5, columns=20, initial_state="walk")
+    """
+    hou = ensure_connected(host, port)
+
+    # Check if parent exists; if not, create a new geo container
+    parent = hou.node(parent_path)
+    if parent is None:
+        obj = hou.node("/obj")
+        if obj is None:
+            return {"status": "error", "message": "Cannot find /obj context"}
+        parent_name = parent_path.split("/")[-1]
+        parent = obj.createNode("geo", parent_name)
+        file_node = parent.node("file1")
+        if file_node:
+            file_node.destroy()
+
+    # Verify agent setup path exists
+    agent_node = hou.node(agent_setup_path)
+    if agent_node is None:
+        return {
+            "status": "error",
+            "message": f"Agent setup node not found: {agent_setup_path}. "
+            "Run setup_crowd_agent() first.",
+        }
+
+    # Merge agent definition
+    obj_merge = parent.createNode("object_merge", "agent_definition_in")
+    obj_merge.parm("objpath1").set(agent_setup_path)
+    if obj_merge.parm("xformtype"):
+        obj_merge.parm("xformtype").set(0)
+
+    # Create crowdsource with formation layout
+    crowd_source = parent.createNode("crowdsource", "crowd_formation_source")
+    crowd_source.setInput(0, obj_merge)
+
+    # Configure formation layout
+    # layout parm: 0 = Random, 1 = Formation
+    if crowd_source.parm("layout"):
+        crowd_source.parm("layout").set(1)
+    if crowd_source.parm("rows"):
+        crowd_source.parm("rows").set(rows)
+    if crowd_source.parm("columns"):
+        crowd_source.parm("columns").set(columns)
+    if crowd_source.parm("spacing"):
+        crowd_source.parm("spacing").set(spacing)
+
+    # Set initial state
+    if crowd_source.parm("initialstate"):
+        crowd_source.parm("initialstate").set(initial_state)
+
+    # Set display flag
+    crowd_source.setDisplayFlag(True)
+    crowd_source.setRenderFlag(True)
+
+    parent.layoutChildren()
+
+    return {
+        "status": "success",
+        "geo_path": parent.path(),
+        "source_path": crowd_source.path(),
+        "agent_count": rows * columns,
+        "formation": {
+            "rows": rows,
+            "columns": columns,
+            "spacing": spacing,
+        },
+    }
+
+
+# =============================================================================
+# Clip Transition Graph
+# =============================================================================
+
+
+@handle_connection_errors("add_crowd_clip_transition_graph")
+def add_crowd_clip_transition_graph(
+    parent_path: str,
+    agent_setup_path: str,
+    clip_names: Optional[List[str]] = None,
+    blend_frames: int = 10,
+    auto_compute: bool = True,
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Create a Clip Transition Graph SOP for smooth animation blending.
+
+    Creates an agentcliptransitiongraph SOP that defines optimal transition
+    points between animation clips. This enables smooth blending when agents
+    change states, avoiding jarring clip switches.
+
+    Args:
+        parent_path: Path to the agent setup geometry container
+        agent_setup_path: Path to the agent definition cache node to wire as input
+        clip_names: Optional list of clip names to include in the graph.
+            If not provided, all clips on the agent are used.
+        blend_frames: Number of frames for transition blending (default: 10)
+        auto_compute: If True, auto-compute sync frames from foot timing (default: True)
+        host: Houdini RPC server hostname
+        port: Houdini RPC server port
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - graph_path: Path to the agentcliptransitiongraph node
+        - cache_path: Path to the updated agentdefinitioncache node (if created)
+        - blend_frames: Number of blend frames configured
+        - auto_compute: Whether auto-compute was enabled
+
+    Examples:
+        add_crowd_clip_transition_graph("/obj/soldier_agent_setup",
+                                        "/obj/soldier_agent_setup/soldier_cache")
+        add_crowd_clip_transition_graph("/obj/agent_setup", agent_cache,
+                                        clip_names=["walk", "run", "idle"],
+                                        blend_frames=15)
+    """
+    hou = ensure_connected(host, port)
+
+    parent = hou.node(parent_path)
+    if parent is None:
+        return {"status": "error", "message": f"Parent node not found: {parent_path}"}
+
+    agent_cache = hou.node(agent_setup_path)
+    if agent_cache is None:
+        return {
+            "status": "error",
+            "message": f"Agent setup node not found: {agent_setup_path}",
+        }
+
+    # Create the clip transition graph node
+    graph_node = parent.createNode("agentcliptransitiongraph", "clip_transition_graph")
+    if graph_node is None:
+        return {
+            "status": "error",
+            "message": "Failed to create agentcliptransitiongraph node. "
+            "This node type may not be available in your Houdini version.",
+        }
+
+    # Wire agent definition as input
+    graph_node.setFirstInput(agent_cache)
+
+    # Configure blend frames
+    if graph_node.parm("blendframes"):
+        graph_node.parm("blendframes").set(blend_frames)
+
+    # Configure auto-compute transition graph
+    if auto_compute and graph_node.parm("computetransitiongraph"):
+        graph_node.parm("computetransitiongraph").set(1)
+
+    # Configure specific clip names if provided
+    if clip_names and graph_node.parm("numclips"):
+        graph_node.parm("numclips").set(len(clip_names))
+        for i, clip in enumerate(clip_names):
+            clip_parm = graph_node.parm(f"clipname{i+1}")
+            if clip_parm:
+                clip_parm.set(clip)
+
+    # Create a new definition cache after the graph
+    new_cache = parent.createNode("agentdefinitioncache", "cache_with_transitions")
+    new_cache.setFirstInput(graph_node)
+    new_cache.setDisplayFlag(True)
+    new_cache.setRenderFlag(True)
+
+    parent.layoutChildren()
+
+    return {
+        "status": "success",
+        "graph_path": graph_node.path(),
+        "cache_path": new_cache.path(),
+        "blend_frames": blend_frames,
+        "auto_compute": auto_compute,
+    }
+
+
+# =============================================================================
+# Agent Layers / Diversity
+# =============================================================================
+
+
+@handle_connection_errors("add_crowd_layer")
+def add_crowd_layer(
+    parent_path: str,
+    agent_setup_path: str,
+    layer_name: str,
+    shape_geometry_path: Optional[str] = None,
+    transform_name: Optional[str] = None,
+    layer_assignments: Optional[List[Dict[str, Any]]] = None,
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Set up agent layers for visual diversity (props, clothing variants).
+
+    Creates an agentlayer SOP for adding geometry layers (weapons, hats, etc.)
+    and optionally a crowdassignlayers SOP for random layer assignment across
+    the crowd.
+
+    Args:
+        parent_path: Path to the agent setup geometry container
+        agent_setup_path: Path to the agent definition cache node to wire as input
+        layer_name: Name for the layer (e.g., "sword", "shield", "hat")
+        shape_geometry_path: Optional path to geometry SOP to use as the layer shape.
+            If provided, wired as 2nd input to agentlayer.
+        transform_name: Optional joint/transform name to attach the shape to
+            (e.g., "RightHand", "Head")
+        layer_assignments: Optional list of layer assignment configs for
+            crowdassignlayers. Each dict has:
+            - "name": layer name
+            - "weight": probability weight (default: 1.0)
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - layer_path: Path to the agentlayer node
+        - assign_path: Path to crowdassignlayers node (if assignments provided)
+        - cache_path: Path to the updated definition cache
+        - layer_name: Name of the layer created
+
+    Examples:
+        add_crowd_layer("/obj/agent_setup", agent_cache, "sword",
+                       shape_geometry_path="/obj/weapons/sword_geo",
+                       transform_name="RightHand")
+        add_crowd_layer("/obj/agent_setup", agent_cache, "helmet",
+                       layer_assignments=[
+                           {"name": "helmet_a", "weight": 0.5},
+                           {"name": "helmet_b", "weight": 0.3},
+                           {"name": "no_helmet", "weight": 0.2},
+                       ])
+    """
+    hou = ensure_connected(host, port)
+
+    parent = hou.node(parent_path)
+    if parent is None:
+        return {"status": "error", "message": f"Parent node not found: {parent_path}"}
+
+    agent_cache = hou.node(agent_setup_path)
+    if agent_cache is None:
+        return {
+            "status": "error",
+            "message": f"Agent setup node not found: {agent_setup_path}",
+        }
+
+    # Create agent layer node
+    layer_node = parent.createNode("agentlayer", f"layer_{layer_name}")
+    if layer_node is None:
+        return {
+            "status": "error",
+            "message": "Failed to create agentlayer node.",
+        }
+
+    # Wire agent definition as input 0
+    layer_node.setFirstInput(agent_cache)
+
+    # Wire shape geometry as input 1 if provided
+    if shape_geometry_path:
+        shape_node = hou.node(shape_geometry_path)
+        if shape_node:
+            layer_node.setInput(1, shape_node)
+        else:
+            # Create object_merge to reference external geometry
+            shape_merge = parent.createNode("object_merge", f"shape_{layer_name}_in")
+            shape_merge.parm("objpath1").set(shape_geometry_path)
+            if shape_merge.parm("xformtype"):
+                shape_merge.parm("xformtype").set(0)
+            layer_node.setInput(1, shape_merge)
+
+    # Set layer name
+    if layer_node.parm("layername"):
+        layer_node.parm("layername").set(layer_name)
+
+    # Set transform/joint attachment
+    if transform_name and layer_node.parm("transformname"):
+        layer_node.parm("transformname").set(transform_name)
+
+    last_node = layer_node
+
+    # Create definition cache after layer
+    new_cache = parent.createNode("agentdefinitioncache", f"cache_{layer_name}")
+    new_cache.setFirstInput(last_node)
+    last_node = new_cache
+
+    result = {
+        "status": "success",
+        "layer_path": layer_node.path(),
+        "cache_path": new_cache.path(),
+        "layer_name": layer_name,
+    }
+
+    # Optionally create crowdassignlayers for random assignment
+    if layer_assignments:
+        assign_node = parent.createNode("crowdassignlayers", f"assign_{layer_name}")
+        if assign_node:
+            assign_node.setFirstInput(last_node)
+
+            # Configure layer assignments
+            if assign_node.parm("numlayers"):
+                assign_node.parm("numlayers").set(len(layer_assignments))
+                for i, assignment in enumerate(layer_assignments):
+                    name_parm = assign_node.parm(f"layername{i+1}")
+                    if name_parm:
+                        name_parm.set(assignment.get("name", ""))
+                    weight_parm = assign_node.parm(f"weight{i+1}")
+                    if weight_parm:
+                        weight_parm.set(assignment.get("weight", 1.0))
+
+            assign_node.setDisplayFlag(True)
+            assign_node.setRenderFlag(True)
+            result["assign_path"] = assign_node.path()
+        else:
+            new_cache.setDisplayFlag(True)
+            new_cache.setRenderFlag(True)
+    else:
+        new_cache.setDisplayFlag(True)
+        new_cache.setRenderFlag(True)
+
+    parent.layoutChildren()
+
+    return result
+
+
+# =============================================================================
+# Ragdoll Physics
+# =============================================================================
+
+
+@handle_connection_errors("setup_crowd_ragdoll")
+def setup_crowd_ragdoll(
+    agent_setup_path: str,
+    dopnet_path: str,
+    collision_shape: str = "capsule",
+    create_joints: bool = True,
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Set up ragdoll physics for crowd agents.
+
+    Creates the SOP-level preparation (collision layer, joint configuration)
+    and DOP-level setup (Bullet Solver via Multisolver alongside Crowd Solver)
+    needed for ragdoll transitions.
+
+    SOP Setup:
+    - agentcollisionlayer: Defines collision shapes per body part
+    - agentconfigurejoints: Sets joint rotation limits
+
+    DOP Setup:
+    - Wraps existing Crowd Solver in a Multisolver
+    - Adds Bullet Solver for rigid body physics
+    - Adds ragdoll-ready state transition
+
+    Args:
+        agent_setup_path: Path to the agent setup geometry container
+            (e.g., "/obj/soldier_agent_setup")
+        dopnet_path: Path to the DOP network with crowd solver
+        collision_shape: Default collision shape type:
+            "capsule", "box", or "sphere" (default: "capsule")
+        create_joints: If True, create agentconfigurejoints node (default: True)
+        host: Houdini RPC server hostname
+        port: Houdini RPC server port
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - collision_layer_path: Path to agentcollisionlayer SOP
+        - configure_joints_path: Path to agentconfigurejoints SOP (if created)
+        - multisolver_path: Path to multisolver DOP
+        - bullet_solver_path: Path to Bullet Solver DOP
+        - ragdoll_state_path: Path to ragdoll crowdstate DOP (if created)
+
+    Examples:
+        setup_crowd_ragdoll("/obj/soldier_agent_setup",
+                           "/obj/crowd_sim_dopnet")
+        setup_crowd_ragdoll("/obj/agent_setup", "/obj/dopnet",
+                           collision_shape="box", create_joints=True)
+    """
+    hou = ensure_connected(host, port)
+
+    # --- SOP-level: Collision Layer + Joint Config ---
+    agent_parent = hou.node(agent_setup_path)
+    if agent_parent is None:
+        return {"status": "error", "message": f"Agent setup not found: {agent_setup_path}"}
+
+    # Find existing agent definition cache in the setup
+    cache_node = None
+    for child in agent_parent.children():
+        if child.type().name() == "agentdefinitioncache":
+            cache_node = child
+            break
+
+    if cache_node is None:
+        # Try to find last node as fallback
+        children = agent_parent.children()
+        cache_node = children[-1] if children else None
+
+    result = {"status": "success"}
+
+    # Create collision layer
+    collision_layer = agent_parent.createNode("agentcollisionlayer", "collision_layer")
+    if cache_node:
+        collision_layer.setFirstInput(cache_node)
+
+    # Set default collision shape type
+    if collision_layer.parm("shapetype"):
+        shape_map = {"capsule": 2, "box": 0, "sphere": 1}
+        collision_layer.parm("shapetype").set(shape_map.get(collision_shape, 2))
+
+    result["collision_layer_path"] = collision_layer.path()
+
+    last_sop = collision_layer
+
+    # Create joint configuration
+    if create_joints:
+        configure_joints = agent_parent.createNode("agentconfigurejoints", "configure_joints")
+        configure_joints.setFirstInput(collision_layer)
+
+        # Enable auto-create limits from collision layer
+        if configure_joints.parm("createlimits"):
+            configure_joints.parm("createlimits").set(1)
+
+        result["configure_joints_path"] = configure_joints.path()
+        last_sop = configure_joints
+
+    # Add a new definition cache after ragdoll setup
+    ragdoll_cache = agent_parent.createNode("agentdefinitioncache", "cache_ragdoll")
+    ragdoll_cache.setFirstInput(last_sop)
+    ragdoll_cache.setDisplayFlag(True)
+    ragdoll_cache.setRenderFlag(True)
+    result["ragdoll_cache_path"] = ragdoll_cache.path()
+
+    agent_parent.layoutChildren()
+
+    # --- DOP-level: Multisolver + Bullet ---
+    dopnet = hou.node(dopnet_path)
+    if dopnet is None:
+        return {"status": "error", "message": f"DOP network not found: {dopnet_path}"}
+
+    # Find crowd solver
+    crowd_solver = None
+    for child in dopnet.children():
+        if child.type().name().startswith("crowdsolver"):
+            crowd_solver = child
+            break
+
+    if crowd_solver is None:
+        result["dop_warning"] = "No crowdsolver found. DOP-level ragdoll setup skipped."
+        return result
+
+    # Create multisolver and wire crowd solver into it
+    multisolver = dopnet.createNode("multisolver", "ragdoll_multisolver")
+
+    # Re-wire: multisolver takes crowd solver's position in the chain
+    # Get crowd solver's inputs and re-route through multisolver
+    solver_inputs = crowd_solver.inputs()
+    for idx, inp in enumerate(solver_inputs):
+        if inp is not None:
+            multisolver.setInput(idx, inp)
+
+    # Wire crowd solver as first sub-solver of multisolver
+    crowd_solver.setInput(0, None)  # Disconnect old inputs
+    multisolver.setInput(0, crowd_solver) if not solver_inputs else None
+
+    # Create Bullet solver
+    bullet_solver = dopnet.createNode("bulletrbdsolver", "bullet_solver")
+    result["bullet_solver_path"] = bullet_solver.path()
+
+    # Wire bullet solver into multisolver's merge inputs
+    # Multisolver merges sub-solvers
+    try:
+        multisolver.setInput(0, crowd_solver)
+        multisolver.setInput(1, bullet_solver)
+    except Exception as e:
+        logger.warning(f"Could not wire solvers into multisolver: {e}")
+
+    result["multisolver_path"] = multisolver.path()
+
+    # Create a ragdoll state
+    ragdoll_state = dopnet.createNode("crowdstate", "ragdoll")
+    if ragdoll_state:
+        # Set RBD mode for ragdoll (animated static → full ragdoll)
+        if ragdoll_state.parm("ragdoll"):
+            ragdoll_state.parm("ragdoll").set(1)
+        result["ragdoll_state_path"] = ragdoll_state.path()
+
+        # Wire into states merge if it exists
+        merge_node = dopnet.node("crowd_states_merge")
+        if merge_node:
+            existing_inputs = merge_node.inputs()
+            next_idx = len(existing_inputs)
+            for idx in range(len(existing_inputs)):
+                if existing_inputs[idx] is None:
+                    next_idx = idx
+                    break
+            try:
+                merge_node.setInput(next_idx, ragdoll_state)
+            except Exception as e:
+                logger.warning(f"Could not wire ragdoll state to merge: {e}")
+
+    dopnet.layoutChildren()
+
+    return result
+
+
+# =============================================================================
+# Agent Look At
+# =============================================================================
+
+
+@handle_connection_errors("add_crowd_look_at")
+def add_crowd_look_at(
+    dopnet_path: str,
+    target_position: Optional[List[float]] = None,
+    target_node_path: Optional[str] = None,
+    eye_offset: Optional[List[float]] = None,
+    head_joint: str = "Head",
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Add Agent Look At behavior to the crowd simulation.
+
+    Creates agentlookat and agentlookatapply DOP nodes that make agents
+    turn their heads toward a target position or object.
+
+    Args:
+        dopnet_path: Path to the DOP network
+        target_position: Optional [x, y, z] target position for agents to look at
+        target_node_path: Optional path to a target node (alternative to position)
+        eye_offset: Optional [x, y, z] offset from head joint for eye position
+        head_joint: Name of the head joint/transform (default: "Head")
+        host: Houdini RPC server hostname
+        port: Houdini RPC server port
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - lookat_path: Path to the agentlookat DOP node
+        - apply_path: Path to the agentlookatapply DOP node
+        - target: Target position or node path configured
+
+    Examples:
+        add_crowd_look_at("/obj/crowd_sim_dopnet",
+                         target_position=[10, 2, 0])
+        add_crowd_look_at("/obj/crowd_sim_dopnet",
+                         target_node_path="/obj/target_null",
+                         head_joint="Head")
+    """
+    hou = ensure_connected(host, port)
+
+    dopnet = hou.node(dopnet_path)
+    if dopnet is None:
+        return {"status": "error", "message": f"DOP network not found: {dopnet_path}"}
+
+    # Create agent look at node
+    lookat_node = dopnet.createNode("agentlookat", "agent_lookat")
+    if lookat_node is None:
+        return {
+            "status": "error",
+            "message": "Failed to create agentlookat node. "
+            "This node type may not be available in your Houdini version.",
+        }
+
+    # Configure target
+    if target_position and lookat_node.parm("targetposx"):
+        lookat_node.parm("targetposx").set(target_position[0])
+        lookat_node.parm("targetposy").set(target_position[1])
+        lookat_node.parm("targetposz").set(target_position[2])
+    elif target_node_path and lookat_node.parm("targetpath"):
+        lookat_node.parm("targetpath").set(target_node_path)
+
+    # Set head joint
+    if lookat_node.parm("headjoint"):
+        lookat_node.parm("headjoint").set(head_joint)
+
+    # Set eye offset
+    if eye_offset and lookat_node.parm("eyeoffsetx"):
+        lookat_node.parm("eyeoffsetx").set(eye_offset[0])
+        lookat_node.parm("eyeoffsety").set(eye_offset[1])
+        lookat_node.parm("eyeoffsetz").set(eye_offset[2])
+
+    # Create agent look at apply node
+    apply_node = dopnet.createNode("agentlookatapply", "agent_lookat_apply")
+    if apply_node:
+        apply_node.setFirstInput(lookat_node)
+
+    # Wire into crowd solver
+    crowd_solver = None
+    for child in dopnet.children():
+        if child.type().name().startswith("crowdsolver"):
+            crowd_solver = child
+            break
+
+    if crowd_solver and apply_node:
+        existing_inputs = crowd_solver.inputs()
+        next_input = None
+        for idx in range(1, len(existing_inputs)):
+            if existing_inputs[idx] is None:
+                next_input = idx
+                break
+        if next_input is None:
+            next_input = max(1, len(existing_inputs))
+        try:
+            crowd_solver.setInput(next_input, apply_node)
+        except Exception as e:
+            logger.warning(f"Could not wire look-at to solver: {e}")
+
+    dopnet.layoutChildren()
+
+    result = {
+        "status": "success",
+        "lookat_path": lookat_node.path(),
+    }
+    if apply_node:
+        result["apply_path"] = apply_node.path()
+    if target_position:
+        result["target"] = target_position
+    elif target_node_path:
+        result["target"] = target_node_path
+
+    return result
+
+
+# =============================================================================
+# Motion Path (SOP-based, H20+)
+# =============================================================================
+
+
+@handle_connection_errors("setup_motion_path")
+def setup_motion_path(
+    parent_path: str,
+    agent_setup_path: str,
+    clip_name: str = "walk",
+    clip_speed: float = 1.0,
+    start_frame: int = 1,
+    end_frame: int = 240,
+    enable_avoid: bool = False,
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Create SOP-based Motion Path workflow for crowd (Houdini 20+).
+
+    Creates the Motion Path chain: crowdmotionpath -> (optional avoid) ->
+    crowdmotionpathevaluate. This provides an art-directable alternative
+    to DOP-based simulation for fast iteration.
+
+    Args:
+        parent_path: Path to the geometry container
+        agent_setup_path: Path to the agent definition/source node
+        clip_name: Animation clip name to use (default: "walk")
+        clip_speed: Clip playback speed (default: 1.0)
+        start_frame: Start frame for path generation (default: 1)
+        end_frame: End frame for path generation (default: 240)
+        enable_avoid: If True, add crowdmotionpathavoid for collision
+            avoidance between agents (default: False)
+        host: Houdini RPC server hostname
+        port: Houdini RPC server port
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - motion_path_path: Path to crowdmotionpath node
+        - avoid_path: Path to crowdmotionpathavoid node (if enabled)
+        - evaluate_path: Path to crowdmotionpathevaluate node
+        - clip_name: Clip name configured
+
+    Examples:
+        setup_motion_path("/obj/crowd_sim",
+                         "/obj/soldier_agent_setup/soldier_cache",
+                         clip_name="walk", end_frame=500)
+        setup_motion_path("/obj/crowd_sim", agent_path,
+                         enable_avoid=True, clip_speed=1.2)
+    """
+    hou = ensure_connected(host, port)
+
+    parent = hou.node(parent_path)
+    if parent is None:
+        return {"status": "error", "message": f"Parent node not found: {parent_path}"}
+
+    agent_node = hou.node(agent_setup_path)
+    if agent_node is None:
+        return {
+            "status": "error",
+            "message": f"Agent setup node not found: {agent_setup_path}",
+        }
+
+    # Create motion path entry node
+    motion_path = parent.createNode("crowdmotionpath", "crowd_motion_path")
+    if motion_path is None:
+        return {
+            "status": "error",
+            "message": "Failed to create crowdmotionpath node. "
+            "This node type requires Houdini 20+.",
+        }
+
+    motion_path.setFirstInput(agent_node)
+
+    # Configure clip and timing
+    if motion_path.parm("clipname"):
+        motion_path.parm("clipname").set(clip_name)
+    if motion_path.parm("clipspeed"):
+        motion_path.parm("clipspeed").set(clip_speed)
+    if motion_path.parm("startframe"):
+        motion_path.parm("startframe").set(start_frame)
+    if motion_path.parm("endframe"):
+        motion_path.parm("endframe").set(end_frame)
+
+    last_node = motion_path
+    result = {
+        "status": "success",
+        "motion_path_path": motion_path.path(),
+        "clip_name": clip_name,
+    }
+
+    # Optional: collision avoidance
+    if enable_avoid:
+        avoid_node = parent.createNode("crowdmotionpathavoid", "motion_path_avoid")
+        if avoid_node:
+            avoid_node.setFirstInput(last_node)
+            last_node = avoid_node
+            result["avoid_path"] = avoid_node.path()
+
+    # Create evaluate node (final output)
+    evaluate = parent.createNode("crowdmotionpathevaluate", "motion_path_evaluate")
+    if evaluate is None:
+        return {
+            "status": "error",
+            "message": "Failed to create crowdmotionpathevaluate node.",
+        }
+    evaluate.setFirstInput(last_node)
+    evaluate.setDisplayFlag(True)
+    evaluate.setRenderFlag(True)
+
+    result["evaluate_path"] = evaluate.path()
+
+    parent.layoutChildren()
+
+    return result
+
+
+# =============================================================================
+# Steer Weight Control
+# =============================================================================
+
+
+@handle_connection_errors("add_steer_weight")
+def add_steer_weight(
+    dopnet_path: str,
+    behavior_name: str,
+    weight: float,
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Set the steering weight on an existing POP Steer behavior node.
+
+    Adjusts the weight parameter on a POP Steer node to control how much
+    influence it has relative to other steering behaviors. The Crowd Solver
+    automatically normalizes all steer weights to sum to 1.0.
+
+    Args:
+        dopnet_path: Path to the DOP network
+        behavior_name: Name of the POP Steer behavior node to modify
+        weight: Weight value to set (0.0-10.0). Higher values give more
+            influence relative to other behaviors.
+        host: Houdini RPC server hostname
+        port: Houdini RPC server port
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - behavior_path: Path to the modified behavior node
+        - weight: Weight value set
+        - behavior_type: Type of the behavior node
+
+    Examples:
+        add_steer_weight("/obj/crowd_sim_dopnet", "steer_wander", 0.5)
+        add_steer_weight("/obj/crowd_sim_dopnet", "steer_seek", 2.0)
+    """
+    hou = ensure_connected(host, port)
+
+    dopnet = hou.node(dopnet_path)
+    if dopnet is None:
+        return {"status": "error", "message": f"DOP network not found: {dopnet_path}"}
+
+    # Find the behavior node
+    behavior_node = dopnet.node(behavior_name)
+    if behavior_node is None:
+        # Try to find by searching children
+        for child in dopnet.children():
+            if child.name() == behavior_name:
+                behavior_node = child
+                break
+
+    if behavior_node is None:
+        return {
+            "status": "error",
+            "message": f"Behavior node '{behavior_name}' not found in {dopnet_path}",
+        }
+
+    # Verify it's a POP Steer node
+    node_type = behavior_node.type().name()
+    if not node_type.startswith("popsteer"):
+        return {
+            "status": "error",
+            "message": f"Node '{behavior_name}' is type '{node_type}', not a POP Steer node",
+        }
+
+    # Set weight
+    weight_parm = behavior_node.parm("weight")
+    if weight_parm is None:
+        return {
+            "status": "error",
+            "message": f"No 'weight' parameter found on {behavior_name}",
+        }
+
+    weight_parm.set(weight)
+
+    return {
+        "status": "success",
+        "behavior_path": behavior_node.path(),
+        "weight": weight,
+        "behavior_type": node_type,
+    }
+
+
+# =============================================================================
+# Foot Planting Configuration
+# =============================================================================
+
+
+@handle_connection_errors("configure_foot_planting")
+def configure_foot_planting(
+    agent_setup_path: str,
+    ankle_joint: str = "LeftAnkle",
+    toe_joint: str = "LeftToe",
+    upper_leg_joint: str = "LeftUpperLeg",
+    knee_joint: str = "LeftKnee",
+    enable_foot_locking: bool = True,
+    adjust_hips: bool = True,
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Configure foot planting for crowd terrain adaptation.
+
+    Sets up the Agent Prep SOP's lower limb definitions and configures
+    terrain adaptation parameters for natural foot-ground contact.
+    Prevents foot skating and floating when agents walk on terrain.
+
+    Args:
+        agent_setup_path: Path to the agent setup geometry container
+        ankle_joint: Name of the ankle joint (default: "LeftAnkle")
+        toe_joint: Name of the toe joint (default: "LeftToe")
+        upper_leg_joint: Name of the upper leg joint (default: "LeftUpperLeg")
+        knee_joint: Name of the knee joint (default: "LeftKnee")
+        enable_foot_locking: Enable foot locking to prevent skating (default: True)
+        adjust_hips: Enable automatic hip height adjustment (default: True)
+        host: Houdini RPC server hostname
+        port: Houdini RPC server port
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - prep_path: Path to the agentprep node configured
+        - joints_configured: Dict of joint names set
+        - foot_locking: Whether foot locking is enabled
+        - hip_adjustment: Whether hip adjustment is enabled
+
+    Examples:
+        configure_foot_planting("/obj/soldier_agent_setup")
+        configure_foot_planting("/obj/agent_setup",
+                               ankle_joint="RightAnkle",
+                               toe_joint="RightToe",
+                               upper_leg_joint="RightUpperLeg",
+                               knee_joint="RightKnee")
+    """
+    hou = ensure_connected(host, port)
+
+    agent_parent = hou.node(agent_setup_path)
+    if agent_parent is None:
+        return {"status": "error", "message": f"Agent setup not found: {agent_setup_path}"}
+
+    # Find agentprep node
+    prep_node = None
+    for child in agent_parent.children():
+        if child.type().name() == "agentprep":
+            prep_node = child
+            break
+
+    if prep_node is None:
+        return {
+            "status": "error",
+            "message": f"No agentprep node found in {agent_setup_path}. "
+            "Run setup_crowd_agent() first.",
+        }
+
+    # Configure lower limb joints
+    joints_configured = {}
+
+    if prep_node.parm("upperleg"):
+        prep_node.parm("upperleg").set(upper_leg_joint)
+        joints_configured["upper_leg"] = upper_leg_joint
+
+    if prep_node.parm("knee"):
+        prep_node.parm("knee").set(knee_joint)
+        joints_configured["knee"] = knee_joint
+
+    if prep_node.parm("ankle"):
+        prep_node.parm("ankle").set(ankle_joint)
+        joints_configured["ankle"] = ankle_joint
+
+    if prep_node.parm("toe"):
+        prep_node.parm("toe").set(toe_joint)
+        joints_configured["toe"] = toe_joint
+
+    # Configure foot locking
+    if prep_node.parm("enablefootlocking"):
+        prep_node.parm("enablefootlocking").set(1 if enable_foot_locking else 0)
+
+    # Configure hip adjustment
+    if prep_node.parm("adjusthips"):
+        prep_node.parm("adjusthips").set(1 if adjust_hips else 0)
+
+    return {
+        "status": "success",
+        "prep_path": prep_node.path(),
+        "joints_configured": joints_configured,
+        "foot_locking": enable_foot_locking,
+        "hip_adjustment": adjust_hips,
     }
