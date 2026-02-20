@@ -98,8 +98,97 @@ def execute_code(
     def run_code() -> None:
         """Execute code in a separate thread for timeout support."""
         try:
-            # Execute in a namespace with hou available
-            exec_globals = {"hou": hou, "__builtins__": __builtins__}
+            # Execute in a namespace with hou available.
+            # Restrict __builtins__ to a safe subset: allow common operations
+            # needed for Houdini scripting but block dangerous ones like
+            # __import__, exec, eval, compile, open, etc.
+            import builtins as _builtins_mod
+
+            _SAFE_BUILTINS = {
+                # Types and constructors
+                "bool": _builtins_mod.bool,
+                "int": _builtins_mod.int,
+                "float": _builtins_mod.float,
+                "str": _builtins_mod.str,
+                "bytes": _builtins_mod.bytes,
+                "list": _builtins_mod.list,
+                "tuple": _builtins_mod.tuple,
+                "dict": _builtins_mod.dict,
+                "set": _builtins_mod.set,
+                "frozenset": _builtins_mod.frozenset,
+                "type": _builtins_mod.type,
+                "object": _builtins_mod.object,
+                # Iteration and ranges
+                "range": _builtins_mod.range,
+                "enumerate": _builtins_mod.enumerate,
+                "zip": _builtins_mod.zip,
+                "map": _builtins_mod.map,
+                "filter": _builtins_mod.filter,
+                "reversed": _builtins_mod.reversed,
+                "sorted": _builtins_mod.sorted,
+                "iter": _builtins_mod.iter,
+                "next": _builtins_mod.next,
+                # Math and comparison
+                "abs": _builtins_mod.abs,
+                "min": _builtins_mod.min,
+                "max": _builtins_mod.max,
+                "sum": _builtins_mod.sum,
+                "round": _builtins_mod.round,
+                "pow": _builtins_mod.pow,
+                "divmod": _builtins_mod.divmod,
+                # String and formatting
+                "repr": _builtins_mod.repr,
+                "format": _builtins_mod.format,
+                "chr": _builtins_mod.chr,
+                "ord": _builtins_mod.ord,
+                "hex": _builtins_mod.hex,
+                "oct": _builtins_mod.oct,
+                "bin": _builtins_mod.bin,
+                "ascii": _builtins_mod.ascii,
+                # Logic and identity
+                "len": _builtins_mod.len,
+                "isinstance": _builtins_mod.isinstance,
+                "issubclass": _builtins_mod.issubclass,
+                "hasattr": _builtins_mod.hasattr,
+                "getattr": _builtins_mod.getattr,
+                "setattr": _builtins_mod.setattr,
+                "callable": _builtins_mod.callable,
+                "id": _builtins_mod.id,
+                "hash": _builtins_mod.hash,
+                # Collections
+                "any": _builtins_mod.any,
+                "all": _builtins_mod.all,
+                # Output
+                "print": _builtins_mod.print,
+                # Exceptions (needed for try/except)
+                "Exception": _builtins_mod.Exception,
+                "ValueError": _builtins_mod.ValueError,
+                "TypeError": _builtins_mod.TypeError,
+                "KeyError": _builtins_mod.KeyError,
+                "IndexError": _builtins_mod.IndexError,
+                "AttributeError": _builtins_mod.AttributeError,
+                "RuntimeError": _builtins_mod.RuntimeError,
+                "StopIteration": _builtins_mod.StopIteration,
+                "None": None,
+                "True": True,
+                "False": False,
+                # Allow __import__ for standard module imports needed in HOM scripting
+                # (e.g., import math, import json). Dangerous modules are caught by
+                # _detect_dangerous_code() before execution reaches here.
+                "__import__": _builtins_mod.__import__,
+                # Required for class definitions (Python uses __build_class__ internally)
+                "__build_class__": _builtins_mod.__build_class__,
+                # OOP helpers commonly needed in Houdini scripting
+                "super": _builtins_mod.super,
+                "classmethod": _builtins_mod.classmethod,
+                "staticmethod": _builtins_mod.staticmethod,
+                "property": _builtins_mod.property,
+                # Deliberately EXCLUDED: exec, eval, compile,
+                # open, input, exit, quit, globals, locals, vars, dir,
+                # delattr, breakpoint, memoryview
+            }
+
+            exec_globals = {"hou": hou, "__builtins__": _SAFE_BUILTINS, "__name__": "__main__"}
 
             with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
                 exec(code, exec_globals)

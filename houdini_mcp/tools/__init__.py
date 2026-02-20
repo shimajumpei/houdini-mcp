@@ -54,6 +54,16 @@ from .pane_screenshot import (
     render_node_network,
     VALID_PANE_TYPES,
 )
+from .crowd import (
+    setup_crowd_agent,
+    setup_crowd_source,
+    setup_crowd_dop,
+    add_crowd_behavior,
+    add_crowd_transition,
+    setup_crowd_terrain,
+    get_crowd_info,
+    validate_crowd_setup,
+)
 
 # Import shared utilities from _common (needed by some tests)
 from ._common import (
@@ -137,4 +147,13 @@ __all__ = [
     "capture_multiple_panes",
     "render_node_network",
     "VALID_PANE_TYPES",
+    # Crowd simulation
+    "setup_crowd_agent",
+    "setup_crowd_source",
+    "setup_crowd_dop",
+    "add_crowd_behavior",
+    "add_crowd_transition",
+    "setup_crowd_terrain",
+    "get_crowd_info",
+    "validate_crowd_setup",
 ]

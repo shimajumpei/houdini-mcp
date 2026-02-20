@@ -4,7 +4,6 @@ This module provides tools for rendering the Houdini viewport
 and capturing images for AI analysis.
 """
 
-import base64
 import logging
 import math
 import traceback
@@ -32,6 +31,121 @@ def _get_remote_modules():
     remote_os = conn.modules.os
     remote_tempfile = conn.modules.tempfile
     return remote_os, remote_tempfile
+
+
+def _read_remote_file_as_base64(file_path: str) -> str:
+    """Read a file on the remote Houdini machine and return base64-encoded string.
+
+    RPyC netref proxies don't materialize binary data (bytes) across the network
+    boundary - f.read() returns a netref that base64.b64encode() sees as empty.
+    However, strings DO auto-materialize over RPyC.
+
+    Solution: Perform the base64 encoding on the remote (Houdini) side,
+    then transfer the resulting string back to the local side.
+
+    Args:
+        file_path: Path to the file on the remote machine
+
+    Returns:
+        Base64-encoded string of the file contents
+    """
+    conn = get_connection()
+    if conn is None:
+        raise HoudiniConnectionError("No active connection to Houdini")
+
+    # Access remote modules for encoding on the Houdini side
+    remote_base64 = conn.modules.base64
+    remote_builtins = conn.builtins
+
+    # Read and encode entirely on the remote side
+    # The resulting string auto-materializes over RPyC
+    with remote_builtins.open(file_path, "rb") as f:
+        data = f.read()
+    return str(remote_base64.b64encode(data).decode("utf-8"))
+
+
+def _compute_scene_bbox(hou: Any, obj_context: Any) -> Dict[str, Any]:
+    """
+    Compute collective bounding box of all displayed geometry in /obj.
+
+    Args:
+        hou: The hou module (remote or local)
+        obj_context: The /obj node
+
+    Returns:
+        Dict with keys: center (list[3]), size (float), info (dict or None).
+        info contains min, max, center, size if geometry was found.
+    """
+    bbox_center = [0.0, 0.0, 0.0]
+    bbox_size = 10.0  # Default size
+    bbox_info = None
+
+    # Find all displayed geometry nodes
+    displayed_geo = []
+    for node in obj_context.children():
+        try:
+            node_type = node.type().name()
+            if node_type in ["geo", "subnet"] and node.isDisplayFlagSet():
+                displayed_geo.append(node)
+        except Exception:
+            continue
+
+    if not displayed_geo:
+        return {"center": bbox_center, "size": bbox_size, "info": bbox_info}
+
+    min_bounds = [float("inf")] * 3
+    max_bounds = [float("-inf")] * 3
+
+    for node in displayed_geo:
+        try:
+            display_node = node.displayNode()
+            if display_node is None:
+                continue
+            geo = display_node.geometry()
+            if geo is None:
+                continue
+            bbox = geo.boundingBox()
+            if bbox is None:
+                continue
+
+            # Get node's world transform
+            transform = node.worldTransform()
+
+            # Transform bounding box corners to world space
+            for x in [bbox.minvec()[0], bbox.maxvec()[0]]:
+                for y in [bbox.minvec()[1], bbox.maxvec()[1]]:
+                    for z in [bbox.minvec()[2], bbox.maxvec()[2]]:
+                        point = hou.Vector4(x, y, z, 1.0)
+                        transformed = point * transform
+                        min_bounds[0] = min(min_bounds[0], transformed[0])
+                        min_bounds[1] = min(min_bounds[1], transformed[1])
+                        min_bounds[2] = min(min_bounds[2], transformed[2])
+                        max_bounds[0] = max(max_bounds[0], transformed[0])
+                        max_bounds[1] = max(max_bounds[1], transformed[1])
+                        max_bounds[2] = max(max_bounds[2], transformed[2])
+        except Exception as e:
+            logger.debug(f"Error getting bbox for {node.path()}: {e}")
+            continue
+
+    if min_bounds[0] != float("inf"):
+        bbox_center = [
+            (min_bounds[0] + max_bounds[0]) / 2,
+            (min_bounds[1] + max_bounds[1]) / 2,
+            (min_bounds[2] + max_bounds[2]) / 2,
+        ]
+        bbox_size = max(
+            max_bounds[0] - min_bounds[0],
+            max_bounds[1] - min_bounds[1],
+            max_bounds[2] - min_bounds[2],
+        )
+        bbox_info = {
+            "min": min_bounds,
+            "max": max_bounds,
+            "center": bbox_center,
+            "size": bbox_size,
+        }
+
+    return {"center": bbox_center, "size": bbox_size, "info": bbox_info}
 
 
 def render_viewport(
@@ -105,69 +219,10 @@ def render_viewport(
         bbox_size = 10.0  # Default size
 
         if auto_frame:
-            # Find all displayed geometry nodes
-            displayed_geo = []
-            for node in obj_context.children():
-                try:
-                    node_type = node.type().name()
-                    if node_type in ["geo", "subnet"] and node.isDisplayFlagSet():
-                        displayed_geo.append(node)
-                except Exception:
-                    continue
-
-            # Calculate collective bounding box
-            if displayed_geo:
-                min_bounds = [float("inf")] * 3
-                max_bounds = [float("-inf")] * 3
-
-                for node in displayed_geo:
-                    try:
-                        display_node = node.displayNode()
-                        if display_node is None:
-                            continue
-                        geo = display_node.geometry()
-                        if geo is None:
-                            continue
-                        bbox = geo.boundingBox()
-                        if bbox is None:
-                            continue
-
-                        # Get node's world transform
-                        transform = node.worldTransform()
-
-                        # Transform bounding box corners
-                        for x in [bbox.minvec()[0], bbox.maxvec()[0]]:
-                            for y in [bbox.minvec()[1], bbox.maxvec()[1]]:
-                                for z in [bbox.minvec()[2], bbox.maxvec()[2]]:
-                                    point = hou.Vector4(x, y, z, 1.0)
-                                    transformed = point * transform
-                                    min_bounds[0] = min(min_bounds[0], transformed[0])
-                                    min_bounds[1] = min(min_bounds[1], transformed[1])
-                                    min_bounds[2] = min(min_bounds[2], transformed[2])
-                                    max_bounds[0] = max(max_bounds[0], transformed[0])
-                                    max_bounds[1] = max(max_bounds[1], transformed[1])
-                                    max_bounds[2] = max(max_bounds[2], transformed[2])
-                    except Exception as e:
-                        logger.debug(f"Error getting bbox for {node.path()}: {e}")
-                        continue
-
-                if min_bounds[0] != float("inf"):
-                    bbox_center = [
-                        (min_bounds[0] + max_bounds[0]) / 2,
-                        (min_bounds[1] + max_bounds[1]) / 2,
-                        (min_bounds[2] + max_bounds[2]) / 2,
-                    ]
-                    bbox_size = max(
-                        max_bounds[0] - min_bounds[0],
-                        max_bounds[1] - min_bounds[1],
-                        max_bounds[2] - min_bounds[2],
-                    )
-                    bbox_info = {
-                        "min": min_bounds,
-                        "max": max_bounds,
-                        "center": bbox_center,
-                        "size": bbox_size,
-                    }
+            bbox_result = _compute_scene_bbox(hou, obj_context)
+            bbox_center = bbox_result["center"]
+            bbox_size = bbox_result["size"]
+            bbox_info = bbox_result["info"]
 
         # Override center if look_at is specified
         if look_at:
@@ -297,10 +352,10 @@ def render_viewport(
                 return {"status": "error", "message": f"Unknown renderer: {renderer}"}
 
             # Read rendered image from REMOTE MACHINE and encode as base64
+            # NOTE: We encode on the remote side because RPyC netref proxies
+            # don't materialize binary data. Strings auto-materialize over RPyC.
             if remote_os.path.exists(output_path):
-                with remote_os.fdopen(remote_os.open(output_path, remote_os.O_RDONLY), "rb") as f:
-                    image_data = f.read()
-                image_base64 = base64.b64encode(image_data).decode("utf-8")
+                image_base64 = _read_remote_file_as_base64(output_path)
 
                 result = {
                     "status": "success",
@@ -323,6 +378,26 @@ def render_viewport(
                     remote_os.remove(output_path)
                 except Exception:
                     pass
+
+            # Clean up MCP-created scene nodes (camera, null, ROP)
+            # These are temporary nodes that should not persist in the scene.
+            for cleanup_name, cleanup_context in [
+                (cam_name, obj_context),
+                (null_name, obj_context),
+            ]:
+                try:
+                    cleanup_node = cleanup_context.node(cleanup_name)
+                    if cleanup_node is not None:
+                        cleanup_node.destroy()
+                except Exception:
+                    pass
+
+            # Clean up ROP node in /out
+            try:
+                if rop is not None:
+                    rop.destroy()
+            except Exception:
+                pass
 
     except HoudiniConnectionError as e:
         return {"status": "error", "message": str(e)}
@@ -420,72 +495,10 @@ def render_quad_view(
 
         # Calculate bounding box of visible geometry (do this ONCE for all views)
         bbox_info = None
-        bbox_center = [0.0, 0.0, 0.0]
-        bbox_size = 10.0  # Default size
-
-        # Find all displayed geometry nodes
-        displayed_geo = []
-        for node in obj_context.children():
-            try:
-                node_type = node.type().name()
-                if node_type in ["geo", "subnet"] and node.isDisplayFlagSet():
-                    displayed_geo.append(node)
-            except Exception:
-                continue
-
-        # Calculate collective bounding box
-        if displayed_geo:
-            min_bounds = [float("inf")] * 3
-            max_bounds = [float("-inf")] * 3
-
-            for node in displayed_geo:
-                try:
-                    display_node = node.displayNode()
-                    if display_node is None:
-                        continue
-                    geo = display_node.geometry()
-                    if geo is None:
-                        continue
-                    bbox = geo.boundingBox()
-                    if bbox is None:
-                        continue
-
-                    # Get node's world transform
-                    transform = node.worldTransform()
-
-                    # Transform bounding box corners
-                    for x in [bbox.minvec()[0], bbox.maxvec()[0]]:
-                        for y in [bbox.minvec()[1], bbox.maxvec()[1]]:
-                            for z in [bbox.minvec()[2], bbox.maxvec()[2]]:
-                                point = hou.Vector4(x, y, z, 1.0)
-                                transformed = point * transform
-                                min_bounds[0] = min(min_bounds[0], transformed[0])
-                                min_bounds[1] = min(min_bounds[1], transformed[1])
-                                min_bounds[2] = min(min_bounds[2], transformed[2])
-                                max_bounds[0] = max(max_bounds[0], transformed[0])
-                                max_bounds[1] = max(max_bounds[1], transformed[1])
-                                max_bounds[2] = max(max_bounds[2], transformed[2])
-                except Exception as e:
-                    logger.debug(f"Error getting bbox for {node.path()}: {e}")
-                    continue
-
-            if min_bounds[0] != float("inf"):
-                bbox_center = [
-                    (min_bounds[0] + max_bounds[0]) / 2,
-                    (min_bounds[1] + max_bounds[1]) / 2,
-                    (min_bounds[2] + max_bounds[2]) / 2,
-                ]
-                bbox_size = max(
-                    max_bounds[0] - min_bounds[0],
-                    max_bounds[1] - min_bounds[1],
-                    max_bounds[2] - min_bounds[2],
-                )
-                bbox_info = {
-                    "min": min_bounds,
-                    "max": max_bounds,
-                    "center": bbox_center,
-                    "size": bbox_size,
-                }
+        bbox_result = _compute_scene_bbox(hou, obj_context)
+        bbox_center = bbox_result["center"]
+        bbox_size = bbox_result["size"]
+        bbox_info = bbox_result["info"]
 
         # Create camera rig (null + camera) - reused for all views
         null_name = "_mcp_quad_cam_center"
@@ -593,12 +606,10 @@ def render_quad_view(
                         rop.render()
 
                     # Read and encode image from REMOTE MACHINE
+                    # NOTE: We encode on the remote side because RPyC netref proxies
+                    # don't materialize binary data. Strings auto-materialize over RPyC.
                     if remote_os.path.exists(output_path):
-                        with remote_os.fdopen(
-                            remote_os.open(output_path, remote_os.O_RDONLY), "rb"
-                        ) as f:
-                            image_data = f.read()
-                        image_base64 = base64.b64encode(image_data).decode("utf-8")
+                        image_base64 = _read_remote_file_as_base64(output_path)
 
                         view_results.append(
                             {
@@ -635,6 +646,26 @@ def render_quad_view(
                         "error": str(e),
                     }
                 )
+
+        # Clean up MCP-created scene nodes (camera, null, ROP)
+        # These are temporary nodes that should not persist in the scene.
+        for cleanup_name, cleanup_context in [
+            (cam_name, obj_context),
+            (null_name, obj_context),
+        ]:
+            try:
+                cleanup_node = cleanup_context.node(cleanup_name)
+                if cleanup_node is not None:
+                    cleanup_node.destroy()
+            except Exception:
+                pass
+
+        # Clean up ROP node in /out
+        try:
+            if rop is not None:
+                rop.destroy()
+        except Exception:
+            pass
 
         # Calculate total render time
         total_time_ms = (time.time() - start_time) * 1000

@@ -173,7 +173,7 @@ def _capture_pane_to_bytes(
     pane_type_name: str,
     QtWidgets: Any,
     QtCore: Any,
-    fit_contents: bool = False,
+    fit_contents: bool = True,
 ) -> Dict[str, Any]:
     """
     Internal function to capture a pane screenshot and return raw bytes.
@@ -248,13 +248,32 @@ def _capture_pane_to_bytes(
             "message": "Screen grab returned null pixmap. The screen region may not be accessible.",
         }
 
-    # Convert to PNG bytes
+    # Convert to PNG bytes and encode to base64 ON THE REMOTE SIDE.
+    # RPyC netref proxies don't materialize binary data (bytes) across the
+    # network boundary - bytes(buffer.data().data()) returns empty b''.
+    # However, strings DO auto-materialize over RPyC, so we perform the
+    # base64 encoding on the remote Houdini side and transfer as string.
     image = pixmap.toImage()
     buffer = QtCore.QBuffer()
     buffer.open(QtCore.QIODevice.WriteOnly)
     image.save(buffer, "PNG")
     buffer.close()
-    raw_bytes = bytes(buffer.data().data())
+
+    # Get remote base64 module for encoding on the Houdini side
+    conn = get_connection()
+    if conn is None:
+        return {"status": "error", "message": "No active RPyC connection for image encoding"}
+    remote_base64 = conn.modules.base64
+
+    # Encode on remote side - the resulting string auto-materializes over RPyC.
+    # buffer.data() returns a QByteArray netref; bytes(netref) fails with
+    # "'bytes' object cannot be interpreted as an integer".
+    # Call .data() on QByteArray to get raw bytes on the remote side,
+    # then pass directly to remote base64 so everything stays remote.
+    qbyte_array = buffer.data()
+    raw_bytes_remote = qbyte_array.data()  # QByteArray.data() -> bytes on remote side
+    image_base64 = str(remote_base64.b64encode(raw_bytes_remote).decode("utf-8"))
+    image_size_bytes = len(qbyte_array)
 
     # Get pane name safely
     try:
@@ -267,7 +286,8 @@ def _capture_pane_to_bytes(
         "pane_type": pane_type_name,
         "pane_name": pane_name,
         "geometry": {"x": geom_x, "y": geom_y, "width": geom_width, "height": geom_height},
-        "raw_bytes": raw_bytes,
+        "image_base64": image_base64,
+        "image_size_bytes": int(image_size_bytes),
     }
 
 
@@ -275,7 +295,7 @@ def _capture_pane_to_bytes(
 def capture_pane_screenshot(
     pane_type_name: str = "NetworkEditor",
     save_path: Optional[str] = None,
-    fit_contents: bool = False,
+    fit_contents: bool = True,
     host: str = "localhost",
     port: int = 18811,
 ) -> Dict[str, Any]:
@@ -346,25 +366,25 @@ def capture_pane_screenshot(
             "Ensure Houdini has PySide2 available.",
         }
 
-    # Capture pane to bytes
+    # Capture pane and get base64-encoded image (encoded on remote side)
     result = _capture_pane_to_bytes(hou, pane_type_name, QtWidgets, QtCore, fit_contents)
 
     if result["status"] != "success":
         return result
 
-    # Extract raw bytes and add format info
-    raw_bytes: bytes = result.pop("raw_bytes")
+    # Add format info
     result["image_format"] = "png"
-    result["image_size_bytes"] = len(raw_bytes)
 
     # Either save to disk or return as base64
     if save_path:
+        # Decode base64 back to bytes for file saving
+        image_base64 = result.pop("image_base64")
+        raw_bytes = base64.b64decode(image_base64)
         path = Path(save_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw_bytes)
         result["file_path"] = str(path.absolute())
-    else:
-        result["image_base64"] = base64.b64encode(raw_bytes).decode("utf-8")
+    # else: image_base64 is already in result from _capture_pane_to_bytes
 
     return result
 
@@ -561,19 +581,16 @@ def render_node_network(
             "message": f"Failed to navigate to {node_path}: {e}",
         }
 
-    # Capture the pane
+    # Capture the pane (base64 encoded on remote side)
     result = _capture_pane_to_bytes(hou, "NetworkEditor", QtWidgets, QtCore, fit_contents)
 
     if result["status"] != "success":
         return result
 
-    # Extract raw bytes and build response
-    raw_bytes: bytes = result.pop("raw_bytes")
+    # Build response - image_base64 and image_size_bytes already in result
     result["node_path"] = node_path
     result["child_count"] = child_count
     result["image_format"] = "png"
-    result["image_size_bytes"] = len(raw_bytes)
-    result["image_base64"] = base64.b64encode(raw_bytes).decode("utf-8")
 
     return result
 
@@ -640,17 +657,17 @@ def capture_multiple_panes(
         result = _capture_pane_to_bytes(hou, pane_type_name, QtWidgets, QtCore)
 
         if result["status"] == "success":
-            raw_bytes: bytes = result.pop("raw_bytes")
             result["image_format"] = "png"
-            result["image_size_bytes"] = len(raw_bytes)
 
             if save_dir:
+                # Decode base64 back to bytes for file saving
+                image_base64 = result.pop("image_base64")
+                raw_bytes = base64.b64decode(image_base64)
                 path = Path(save_dir) / f"{pane_type_name}.png"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(raw_bytes)
                 result["file_path"] = str(path.absolute())
-            else:
-                result["image_base64"] = base64.b64encode(raw_bytes).decode("utf-8")
+            # else: image_base64 is already in result from _capture_pane_to_bytes
 
             success_count += 1
 

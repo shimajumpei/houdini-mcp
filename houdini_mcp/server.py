@@ -1390,6 +1390,249 @@ def render_node_network(
     return tools.render_node_network(node_path, fit_contents, HOUDINI_HOST, HOUDINI_PORT)
 
 
+# =============================================================================
+# Crowd Simulation Tools
+# =============================================================================
+
+
+@mcp.tool()
+def setup_crowd_agent(
+    agent_name: str,
+    clip_paths: Optional[List[str]] = None,
+    parent_path: str = "/obj",
+    agent_file: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a complete agent definition chain for crowd simulation.
+
+    Builds the standard agent pipeline: agent -> agentclip -> agentprep -> agentdefinitioncache.
+    All nodes are created inside a geometry container, wired, and the display flag is set.
+
+    Args:
+        agent_name: Name for the agent (used for container and node naming)
+        clip_paths: Optional list of motion clip file paths (.bclip, .fbx)
+        parent_path: Parent path for the geo container (default: "/obj")
+        agent_file: Optional path to agent definition file (.agent, .fbx)
+
+    Returns:
+        Dict with geo_path, agent_path, prep_path, cache_path, clip_path (if clips provided)
+
+    Examples:
+        setup_crowd_agent("soldier")
+        setup_crowd_agent("civilian", agent_file="/path/to/char.fbx",
+                         clip_paths=["/path/to/walk.bclip"])
+    """
+    return tools.setup_crowd_agent(
+        agent_name, clip_paths, parent_path, agent_file, HOUDINI_HOST, HOUDINI_PORT
+    )
+
+
+@mcp.tool()
+def setup_crowd_source(
+    parent_path: str,
+    agent_setup_path: str,
+    source_type: str = "scatter",
+    count: int = 100,
+    initial_state: str = "idle",
+) -> Dict[str, Any]:
+    """
+    Create crowd source/placement setup.
+
+    Sets up how agents are scattered in the scene. Creates a crowdsource SOP
+    linked to the agent definition.
+
+    Args:
+        parent_path: Path to the crowd sim geo container (e.g., "/obj/crowd_sim")
+        agent_setup_path: Path to agent definition cache node
+        source_type: "scatter" (random on grid) or "points" (from existing points)
+        count: Number of agents to scatter (default: 100)
+        initial_state: Initial crowd state name (default: "idle")
+
+    Returns:
+        Dict with geo_path, source_path, scatter_path, grid_path
+
+    Examples:
+        setup_crowd_source("/obj/crowd_sim", "/obj/soldier_agent_setup/soldier_cache")
+    """
+    return tools.setup_crowd_source(
+        parent_path, agent_setup_path, source_type, count, initial_state,
+        HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def setup_crowd_dop(
+    parent_path: str = "/obj",
+    crowd_source_path: Optional[str] = None,
+    solver_substeps: int = 1,
+) -> Dict[str, Any]:
+    """
+    Create a complete DOP simulation network for crowd.
+
+    Builds: dopnet with crowdobject, crowdsolver, groundplane, and gravity.
+
+    Args:
+        parent_path: Parent path for the dopnet (default: "/obj")
+        crowd_source_path: Optional path to crowd source SOP for linking
+        solver_substeps: Number of simulation substeps (default: 1)
+
+    Returns:
+        Dict with dopnet_path, crowdobject_path, crowdsolver_path,
+        groundplane_path, gravity_path
+
+    Examples:
+        setup_crowd_dop("/obj", "/obj/crowd_sim/crowd_source")
+    """
+    return tools.setup_crowd_dop(
+        parent_path, crowd_source_path, solver_substeps, HOUDINI_HOST, HOUDINI_PORT
+    )
+
+
+@mcp.tool()
+def add_crowd_behavior(
+    dopnet_path: str,
+    behavior_type: str,
+    behavior_name: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Add a POP Steer behavior to the crowd solver.
+
+    Creates a steering behavior that controls how agents move.
+
+    Args:
+        dopnet_path: Path to the DOP network
+        behavior_type: Type of behavior:
+            "wander", "seek", "avoid", "follow_path",
+            "separate", "cohesion", "alignment", "obstacle"
+        behavior_name: Optional custom name
+        settings: Optional parameter values (e.g., {"maxforce": 1.0, "maxspeed": 2.0})
+
+    Returns:
+        Dict with behavior_path, behavior_type, settings_applied
+
+    Examples:
+        add_crowd_behavior("/obj/crowd_sim_dopnet", "wander")
+        add_crowd_behavior("/obj/crowd_sim_dopnet", "seek",
+                          settings={"targetposition": [10, 0, 0]})
+    """
+    return tools.add_crowd_behavior(
+        dopnet_path, behavior_type, behavior_name, settings, HOUDINI_HOST, HOUDINI_PORT
+    )
+
+
+@mcp.tool()
+def add_crowd_transition(
+    dopnet_path: str,
+    from_state: str,
+    to_state: str,
+    trigger_type: str,
+    trigger_settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Create a state transition with trigger for the crowd state machine.
+
+    Defines when agents change behavioral states.
+
+    Args:
+        dopnet_path: Path to the DOP network
+        from_state: Source state name (e.g., "idle")
+        to_state: Destination state name (e.g., "walk")
+        trigger_type: Trigger type:
+            "distance", "time", "random", "speed", "attribute", "custom"
+        trigger_settings: Optional trigger parameters, e.g.:
+            - time: {"mintime": 2.0, "maxtime": 5.0}
+            - random: {"probability": 0.1}
+            - speed: {"attribute": "speed", "threshold": 0.5}
+
+    Returns:
+        Dict with trigger_path, transition_path, from_state, to_state
+
+    Examples:
+        add_crowd_transition("/obj/dopnet", "idle", "walk", "time",
+                           {"mintime": 2.0, "maxtime": 5.0})
+    """
+    return tools.add_crowd_transition(
+        dopnet_path, from_state, to_state, trigger_type, trigger_settings,
+        HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def setup_crowd_terrain(
+    parent_path: str,
+    terrain_source: Optional[str] = None,
+    enable_foot_locking: bool = True,
+) -> Dict[str, Any]:
+    """
+    Set up terrain for crowd simulation with terrain adaptation.
+
+    Creates ground geometry and adaptation nodes for proper agent-terrain interaction.
+
+    Args:
+        parent_path: Path to the crowd sim geo container
+        terrain_source: Optional path to existing terrain geometry.
+            If not provided, creates a flat grid.
+        enable_foot_locking: Enable foot locking for terrain adaptation (default: True)
+
+    Returns:
+        Dict with terrain_path, adaptation_path
+
+    Examples:
+        setup_crowd_terrain("/obj/crowd_sim")
+        setup_crowd_terrain("/obj/crowd_sim", terrain_source="/obj/terrain/output")
+    """
+    return tools.setup_crowd_terrain(
+        parent_path, terrain_source, enable_foot_locking, HOUDINI_HOST, HOUDINI_PORT
+    )
+
+
+@mcp.tool()
+def get_crowd_info(
+    root_path: str = "/obj",
+) -> Dict[str, Any]:
+    """
+    Scan and report existing crowd simulation setup.
+
+    Finds all crowd-related nodes and reports their configuration.
+
+    Args:
+        root_path: Root path to scan from (default: "/obj")
+
+    Returns:
+        Dict with agent_definitions, crowd_sources, dop_networks,
+        behaviors, transitions, triggers, total_crowd_nodes
+
+    Examples:
+        get_crowd_info()  # Scan all of /obj
+        get_crowd_info("/obj/my_crowd_setup")  # Scan subtree
+    """
+    return tools.get_crowd_info(root_path, HOUDINI_HOST, HOUDINI_PORT)
+
+
+@mcp.tool()
+def validate_crowd_setup(
+    root_path: str = "/obj",
+) -> Dict[str, Any]:
+    """
+    Validate crowd setup and check for common mistakes.
+
+    Checks for missing components, unconnected nodes, and configuration issues.
+
+    Args:
+        root_path: Root path to validate from (default: "/obj")
+
+    Returns:
+        Dict with is_valid, issues (with severity/category/message/fix_hint),
+        summary, issue_counts
+
+    Examples:
+        validate_crowd_setup()
+        validate_crowd_setup("/obj/my_crowd")
+    """
+    return tools.validate_crowd_setup(root_path, HOUDINI_HOST, HOUDINI_PORT)
+
+
 def run_server(transport: str = "http", port: int = 3055) -> None:
     """Run the MCP server."""
     logger.info(f"Starting Houdini MCP Server on {transport}://0.0.0.0:{port}")

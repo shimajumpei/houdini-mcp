@@ -219,7 +219,7 @@ class TestParameterWorkflow:
         assert len(rad_params) == 1, "Should find 'rad' parameter"
         
         rad_param = rad_params[0]
-        assert rad_param["type"] == "vector"
+        assert rad_param["type"] == "float_vector"
         assert rad_param["tuple_size"] == 3
         
         # Query specific parameter
@@ -330,7 +330,7 @@ class TestErrorHandling:
         assert schema["status"] == "success"
         
         param = schema["parameters"][0]
-        assert param["type"] == "vector"
+        assert param["type"] == "float_vector"
         
         # Set with correct type
         good_result = set_parameter(sphere_path, "rad", [5.0, 5.0, 5.0])

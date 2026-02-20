@@ -1341,21 +1341,26 @@ class TestListChildren:
         assert result["count"] == 2
         assert len(result["children"]) == 2
 
-        # Check grid node (no inputs)
+        # Check grid node (no inputs, one output connection to noise)
         grid_info = next(c for c in result["children"] if c["name"] == "grid1")
         assert grid_info["path"] == "/obj/geo1/grid1"
         assert grid_info["type"] == "grid"
         assert grid_info["inputs"] == []
-        assert grid_info["outputs"] == ["/obj/geo1/noise1"]
+        # Output connections now include detailed port info
+        assert len(grid_info["outputs"]) == 1
+        assert grid_info["outputs"][0]["dest_node"] == "/obj/geo1/noise1"
+        assert grid_info["outputs"][0]["output_index"] == 0
+        assert grid_info["outputs"][0]["dest_input_index"] == 0
 
         # Check noise node (has input from grid)
         noise_info = next(c for c in result["children"] if c["name"] == "noise1")
         assert noise_info["path"] == "/obj/geo1/noise1"
         assert noise_info["type"] == "noise"
         assert len(noise_info["inputs"]) == 1
-        assert noise_info["inputs"][0]["index"] == 0
+        # Input connections now use input_index and source_output_index keys
+        assert noise_info["inputs"][0]["input_index"] == 0
         assert noise_info["inputs"][0]["source_node"] == "/obj/geo1/grid1"
-        assert noise_info["inputs"][0]["output_index"] == 0
+        assert noise_info["inputs"][0]["source_output_index"] == 0
         assert noise_info["outputs"] == []
 
     def test_list_children_recursive(self, mock_connection):

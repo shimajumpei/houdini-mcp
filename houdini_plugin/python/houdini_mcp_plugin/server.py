@@ -163,17 +163,87 @@ def _create_mcp_server():
             return {"status": "error", "message": str(e)}
 
     @mcp.tool()
-    def execute_code(code: str, capture_diff: bool = False) -> Dict[str, Any]:
-        """Execute Python code in Houdini."""
+    def execute_code(
+        code: str, capture_diff: bool = False, allow_dangerous: bool = False
+    ) -> Dict[str, Any]:
+        """Execute Python code in Houdini with safety rails."""
+        import re
+
         hou = conn.hou
         import io
         import contextlib
+        import builtins as _builtins_mod
+
+        # Handle empty code
+        if not code or not code.strip():
+            return {
+                "status": "success",
+                "stdout": "",
+                "stderr": "",
+                "message": "Empty code - nothing to execute",
+            }
+
+        # Scan for dangerous patterns before execution
+        _DANGEROUS_PATTERNS = [
+            (r"\bos\.system\b", "os.system - shell command execution"),
+            (r"\bsubprocess\b", "subprocess - process spawning"),
+            (r"\bshutil\.rmtree\b", "shutil.rmtree - recursive deletion"),
+            (r"\bos\.remove\b", "os.remove - file deletion"),
+            (r"\bos\.unlink\b", "os.unlink - file deletion"),
+            (r"\b__import__\b", "__import__ - dynamic import"),
+        ]
+        dangerous_found = []
+        for pattern, desc in _DANGEROUS_PATTERNS:
+            if re.search(pattern, code):
+                dangerous_found.append(desc)
+
+        if dangerous_found and not allow_dangerous:
+            return {
+                "status": "error",
+                "message": "Dangerous operations detected in code",
+                "dangerous_patterns": dangerous_found,
+                "hint": "Set allow_dangerous=True to proceed",
+            }
+
+        # Restricted builtins (same as main execute_code tool)
+        _SAFE_BUILTINS = {
+            "bool": _builtins_mod.bool, "int": _builtins_mod.int,
+            "float": _builtins_mod.float, "str": _builtins_mod.str,
+            "bytes": _builtins_mod.bytes, "list": _builtins_mod.list,
+            "tuple": _builtins_mod.tuple, "dict": _builtins_mod.dict,
+            "set": _builtins_mod.set, "frozenset": _builtins_mod.frozenset,
+            "type": _builtins_mod.type, "object": _builtins_mod.object,
+            "range": _builtins_mod.range, "enumerate": _builtins_mod.enumerate,
+            "zip": _builtins_mod.zip, "map": _builtins_mod.map,
+            "filter": _builtins_mod.filter, "reversed": _builtins_mod.reversed,
+            "sorted": _builtins_mod.sorted, "iter": _builtins_mod.iter,
+            "next": _builtins_mod.next,
+            "abs": _builtins_mod.abs, "min": _builtins_mod.min,
+            "max": _builtins_mod.max, "sum": _builtins_mod.sum,
+            "round": _builtins_mod.round, "pow": _builtins_mod.pow,
+            "repr": _builtins_mod.repr, "format": _builtins_mod.format,
+            "chr": _builtins_mod.chr, "ord": _builtins_mod.ord,
+            "len": _builtins_mod.len, "isinstance": _builtins_mod.isinstance,
+            "hasattr": _builtins_mod.hasattr, "getattr": _builtins_mod.getattr,
+            "setattr": _builtins_mod.setattr, "callable": _builtins_mod.callable,
+            "any": _builtins_mod.any, "all": _builtins_mod.all,
+            "print": _builtins_mod.print,
+            "Exception": _builtins_mod.Exception,
+            "ValueError": _builtins_mod.ValueError,
+            "TypeError": _builtins_mod.TypeError,
+            "KeyError": _builtins_mod.KeyError,
+            "IndexError": _builtins_mod.IndexError,
+            "AttributeError": _builtins_mod.AttributeError,
+            "RuntimeError": _builtins_mod.RuntimeError,
+            "StopIteration": _builtins_mod.StopIteration,
+            "None": None, "True": True, "False": False,
+            "__import__": _builtins_mod.__import__,
+        }
 
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
 
-        # Create execution context with hou module available
-        exec_globals = {"hou": hou, "__builtins__": __builtins__}
+        exec_globals = {"hou": hou, "__builtins__": _SAFE_BUILTINS}
 
         try:
             with (
@@ -182,11 +252,14 @@ def _create_mcp_server():
             ):
                 exec(code, exec_globals)
 
-            return {
+            result = {
                 "status": "success",
                 "stdout": stdout_capture.getvalue(),
                 "stderr": stderr_capture.getvalue(),
             }
+            if dangerous_found and allow_dangerous:
+                result["dangerous_patterns_executed"] = dangerous_found
+            return result
         except Exception as e:
             return {
                 "status": "error",

@@ -136,30 +136,31 @@ def get_node_info(
     # Add detailed input connection information if requested
     if include_input_details:
         input_connections: List[Dict[str, Any]] = []
-        node_inputs = node.inputs()
 
-        # Cache inputConnectors call OUTSIDE the loop to avoid
-        # redundant RPC calls (was previously called per input)
+        # Use inputConnections() which returns actual NodeConnection objects
+        # with proper inputIndex(), outputIndex(), inputNode(), outputNode() methods.
+        # Previously used inputConnectors() which returns connector (port) info,
+        # NOT connection info — that was a bug causing incorrect output_index values.
         try:
-            connectors = node.inputConnectors()
-        except Exception:
-            connectors = None
-
-        for idx, input_node in enumerate(node_inputs):
-            if input_node is not None:
-                # Use cached connectors
-                source_output_idx = 0
-                if connectors is not None and idx < len(connectors):
-                    connector = connectors[idx]
-                    source_output_idx = connector[1] if len(connector) > 1 else 0
-
+            for conn in node.inputConnections():
                 input_connections.append(
                     {
-                        "input_index": idx,
-                        "source_node": input_node.path(),
-                        "source_output_index": source_output_idx,
+                        "input_index": conn.inputIndex(),
+                        "source_node": conn.inputNode().path(),
+                        "source_output_index": conn.outputIndex(),
                     }
                 )
+        except Exception:
+            # Fallback: use inputs() without detailed connection info
+            for idx, input_node in enumerate(node.inputs()):
+                if input_node is not None:
+                    input_connections.append(
+                        {
+                            "input_index": idx,
+                            "source_node": input_node.path(),
+                            "source_output_index": 0,
+                        }
+                    )
 
         info["input_connections"] = input_connections
 
@@ -454,42 +455,59 @@ def list_children(
                     }
                 else:
                     # Full mode: include input/output connection details
-                    # Build input connection details
+                    # Build input connection details using inputConnections()
+                    # which returns proper NodeConnection objects.
                     input_connections: List[Dict[str, Any]] = []
-                    child_inputs = child.inputs()
-
-                    # Cache inputConnectors call OUTSIDE the loop to avoid
-                    # redundant RPC calls (was previously called per input)
                     try:
-                        connectors = child.inputConnectors()
-                    except Exception:
-                        connectors = None
-
-                    for idx, input_node in enumerate(child_inputs):
-                        if input_node is not None:
-                            # Use cached connectors
-                            output_idx = 0
-                            if connectors is not None and idx < len(connectors):
-                                connector = connectors[idx]
-                                output_idx = connector[1] if len(connector) > 1 else 0
-
+                        for conn in child.inputConnections():
                             input_connections.append(
                                 {
-                                    "index": idx,
-                                    "source_node": input_node.path(),
-                                    "output_index": output_idx,
+                                    "input_index": conn.inputIndex(),
+                                    "source_node": conn.inputNode().path(),
+                                    "source_output_index": conn.outputIndex(),
                                 }
                             )
+                    except Exception:
+                        # Fallback: use inputs() without detailed connection info
+                        for idx, input_node in enumerate(child.inputs()):
+                            if input_node is not None:
+                                input_connections.append(
+                                    {
+                                        "input_index": idx,
+                                        "source_node": input_node.path(),
+                                        "source_output_index": 0,
+                                    }
+                                )
 
-                    # Build output list
-                    output_paths = [out.path() for out in child.outputs()]
+                    # Build output connection details using outputConnections()
+                    # Previously only returned paths, now includes port indices.
+                    output_connections: List[Dict[str, Any]] = []
+                    try:
+                        for conn in child.outputConnections():
+                            output_connections.append(
+                                {
+                                    "output_index": conn.outputIndex(),
+                                    "dest_node": conn.outputNode().path(),
+                                    "dest_input_index": conn.inputIndex(),
+                                }
+                            )
+                    except Exception:
+                        # Fallback: use outputs() without detailed connection info
+                        for out in child.outputs():
+                            output_connections.append(
+                                {
+                                    "output_index": 0,
+                                    "dest_node": out.path(),
+                                    "dest_input_index": 0,
+                                }
+                            )
 
                     child_info = {
                         "path": child.path(),
                         "name": child.name(),
                         "type": child.type().name(),
                         "inputs": input_connections,
-                        "outputs": output_paths,
+                        "outputs": output_connections,
                     }
 
                 children_list.append(child_info)
@@ -560,14 +578,17 @@ def find_nodes(
 
     # Execute search on Houdini side to minimize RPC overhead
     # Uses allSubChildren() which is much faster than recursive children() calls
+    #
+    # SECURITY: Variables are passed via exec_globals instead of string interpolation
+    # to prevent code injection through crafted root_path or pattern values.
     search_code = """
 import fnmatch
 
-root = hou.node("{root_path}")
-pattern = "{pattern}"
-node_type_filter = {node_type_repr}
-max_results = {max_results}
-offset = {offset}
+root = hou.node(_root_path)
+pattern = _pattern
+node_type_filter = _node_type_filter
+max_results = _max_results
+_offset = _offset_val
 
 matches = []
 total_matched = 0
@@ -579,50 +600,49 @@ if root is not None:
         child_name = child.name()
         child_name_lower = child_name.lower()
         pattern_lower = pattern.lower()
-        
+
         # Check name pattern match
         if has_wildcards:
             name_match = fnmatch.fnmatch(child_name_lower, pattern_lower)
         else:
             # Exact match or substring match
             name_match = fnmatch.fnmatch(child_name_lower, pattern_lower) or pattern_lower in child_name_lower
-        
+
         # Check type filter
         type_match = True
         child_type = child.type().name()
         if node_type_filter is not None:
             type_match = child_type.lower() == node_type_filter.lower()
-        
+
         if name_match and type_match:
             total_matched += 1
-            
+
             # Skip items before offset
-            if total_matched <= offset:
+            if total_matched <= _offset:
                 continue
-            
-            matches.append({{
+
+            matches.append({
                 "path": child.path(),
                 "name": child_name,
                 "type": child_type,
-            }})
-            
+            })
+
             # Stop if we have enough results
             if len(matches) >= max_results:
                 break
 
-_result = {{"matches": matches, "total_matched": total_matched}}
-""".format(
-        root_path=root_path,
-        pattern=pattern.replace('"', '\\"'),
-        node_type_repr=repr(node_type),
-        max_results=max_results,
-        offset=offset,
-    )
+_result = {"matches": matches, "total_matched": total_matched}
+"""
 
     try:
         exec_globals: Dict[str, Any] = {
             "hou": hou,
             "_result": {"matches": [], "total_matched": 0},
+            "_root_path": root_path,
+            "_pattern": pattern,
+            "_node_type_filter": node_type,
+            "_max_results": max_results,
+            "_offset_val": offset,
         }
         exec(search_code, exec_globals)
         search_result = exec_globals.get("_result", {"matches": [], "total_matched": 0})

@@ -188,7 +188,7 @@ class TestGetParameterSchema:
         param = result["parameters"][0]
         assert param["name"] == "t"
         assert param["label"] == "Translate"
-        assert param["type"] == "vector"
+        assert param["type"] == "float_vector"
         assert param["tuple_size"] == 3
         assert param["default"] == [0.0, 0.0, 0.0]
         assert param["current_value"] == [1.0, 2.0, 3.0]

@@ -65,6 +65,131 @@ def set_parameter(
     }
 
 
+@handle_connection_errors("set_expression")
+def set_expression(
+    node_path: str,
+    param_name: str,
+    expression: str,
+    language: str = "hscript",
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Set an expression on a parameter.
+
+    Args:
+        node_path: Path to the node (e.g., "/obj/geo1/sphere1")
+        param_name: Name of the parameter (e.g., "tx", "radx")
+        expression: Expression string (e.g., "$F * 0.1", "sin($T)")
+        language: Expression language - "hscript" or "python" (default: "hscript")
+
+    Returns:
+        Dict with result.
+    """
+    hou = ensure_connected(host, port)
+
+    node = hou.node(node_path)
+    if node is None:
+        return {"status": "error", "message": f"Node not found: {node_path}"}
+
+    parm = node.parm(param_name)
+    if parm is None:
+        return {"status": "error", "message": f"Parameter not found: {param_name} on {node_path}"}
+
+    # Set expression language
+    if language.lower() == "python":
+        expr_language = hou.exprLanguage.Python
+    else:
+        expr_language = hou.exprLanguage.Hscript
+
+    parm.setExpression(expression, expr_language)
+
+    return {
+        "status": "success",
+        "node_path": node_path,
+        "param_name": param_name,
+        "expression": expression,
+        "language": language,
+    }
+
+
+@handle_connection_errors("set_keyframes")
+def set_keyframes(
+    node_path: str,
+    param_name: str,
+    keyframes: List[Dict[str, Any]],
+    host: str = "localhost",
+    port: int = 18811,
+) -> Dict[str, Any]:
+    """
+    Set keyframes on a parameter for animation.
+
+    Args:
+        node_path: Path to the node (e.g., "/obj/geo1/sphere1")
+        param_name: Name of the parameter (e.g., "tx")
+        keyframes: List of keyframe dicts, each with:
+            - frame: Frame number (required)
+            - value: Parameter value at that frame (required)
+            - in_slope: Optional incoming tangent slope (default: 0)
+            - out_slope: Optional outgoing tangent slope (default: 0)
+            - expression: Optional expression at this keyframe
+
+    Returns:
+        Dict with result.
+
+    Example:
+        set_keyframes("/obj/geo1", "tx", [
+            {"frame": 1, "value": 0.0},
+            {"frame": 24, "value": 5.0},
+            {"frame": 48, "value": 0.0}
+        ])
+    """
+    hou = ensure_connected(host, port)
+
+    node = hou.node(node_path)
+    if node is None:
+        return {"status": "error", "message": f"Node not found: {node_path}"}
+
+    parm = node.parm(param_name)
+    if parm is None:
+        return {"status": "error", "message": f"Parameter not found: {param_name} on {node_path}"}
+
+    if not keyframes:
+        return {"status": "error", "message": "No keyframes provided"}
+
+    keys_set = 0
+    for kf_data in keyframes:
+        frame = kf_data.get("frame")
+        value = kf_data.get("value")
+
+        if frame is None or value is None:
+            continue
+
+        key = hou.Keyframe()
+        key.setFrame(float(frame))
+        key.setValue(float(value))
+
+        # Optional: set slopes for tangent control
+        if "in_slope" in kf_data:
+            key.setInSlope(float(kf_data["in_slope"]))
+        if "out_slope" in kf_data:
+            key.setSlope(float(kf_data["out_slope"]))
+
+        # Optional: set expression at keyframe
+        if "expression" in kf_data:
+            key.setExpression(kf_data["expression"])
+
+        parm.setKeyframe(key)
+        keys_set += 1
+
+    return {
+        "status": "success",
+        "node_path": node_path,
+        "param_name": param_name,
+        "keyframes_set": keys_set,
+    }
+
+
 @handle_connection_errors("get_parameter_schema")
 def get_parameter_schema(
     node_path: str,
@@ -321,7 +446,7 @@ def _extract_parameter_info(
         param_info["default"] = None
 
     # Get min/max for numeric types
-    if type_str in ("float", "int", "vector"):
+    if type_str in ("float", "int", "float_vector", "int_vector"):
         try:
             min_val = parm_template.minValue()
             max_val = parm_template.maxValue()
@@ -383,9 +508,9 @@ def _map_parm_type_to_string(hou: Any, parm_type: Any, is_tuple: bool = False) -
     try:
         # Access the enum values
         if parm_type == hou.parmTemplateType.Float:
-            return "vector" if is_tuple else "float"
+            return "float_vector" if is_tuple else "float"
         elif parm_type == hou.parmTemplateType.Int:
-            return "vector" if is_tuple else "int"
+            return "int_vector" if is_tuple else "int"
         elif parm_type == hou.parmTemplateType.String:
             return "string"
         elif parm_type == hou.parmTemplateType.Toggle:

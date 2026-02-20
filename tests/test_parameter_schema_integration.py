@@ -166,7 +166,7 @@ def test_get_parameter_schema_sphere_real_world():
     assert "t" in params_by_name
     t = params_by_name["t"]
     assert t["label"] == "Translate"
-    assert t["type"] == "vector"
+    assert t["type"] == "float_vector"
     assert t["tuple_size"] == 3
     assert t["default"] == [0.0, 0.0, 0.0]
     assert t["current_value"] == [1.0, 2.0, 3.0]
@@ -174,7 +174,7 @@ def test_get_parameter_schema_sphere_real_world():
     
     print("✓ Integration test passed!")
     print(f"✓ Retrieved schema for {result['count']} parameters")
-    print(f"✓ Validated float, int, menu, and vector parameter types")
+    print(f"✓ Validated float, int, menu, and float_vector parameter types")
 
 
 def test_get_parameter_schema_specific_parameter():

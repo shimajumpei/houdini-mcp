@@ -24,27 +24,49 @@ logger = logging.getLogger("houdini_mcp.tools.scene")
 @handle_connection_errors("get_scene_info")
 def get_scene_info(host: str = "localhost", port: int = 18811) -> Dict[str, Any]:
     """
-    Get current Houdini scene information.
+    Get current Houdini scene information across all major contexts.
 
     Returns:
-        Dict with scene information including file path, nodes, and Houdini version.
+        Dict with scene information including file path, Houdini version,
+        and nodes organized by context (/obj, /stage, /out, /mat, /ch, /img, /shop).
     """
     hou = ensure_connected(host, port)
 
     hip_file = hou.hipFile.path()
-    obj_node = hou.node("/obj")
 
-    nodes: List[Dict[str, Any]] = []
-    if obj_node:
-        for child in obj_node.children():
-            nodes.append({"path": child.path(), "type": child.type().name(), "name": child.name()})
+    # Scan all major Houdini contexts, not just /obj
+    # This is critical for LOPs/Solaris workflows (/stage), render setups (/out), etc.
+    contexts_to_scan = ["/obj", "/stage", "/out", "/mat", "/ch", "/img", "/shop"]
+    contexts: Dict[str, List[Dict[str, Any]]] = {}
+    total_count = 0
+
+    for context_path in contexts_to_scan:
+        context_node = hou.node(context_path)
+        if context_node is not None:
+            children = []
+            try:
+                for child in context_node.children():
+                    children.append({
+                        "path": child.path(),
+                        "type": child.type().name(),
+                        "name": child.name(),
+                    })
+            except Exception:
+                pass
+            if children:
+                contexts[context_path] = children
+                total_count += len(children)
+
+    # Backward-compatible: also provide flat "nodes" list from /obj for existing consumers
+    obj_nodes = contexts.get("/obj", [])
 
     return {
         "status": "success",
         "hip_file": hip_file if hip_file else "untitled.hip",
         "houdini_version": hou.applicationVersionString(),
-        "node_count": len(nodes),
-        "nodes": nodes,
+        "node_count": total_count,
+        "nodes": obj_nodes,  # backward compatible
+        "contexts": contexts,  # new: all contexts
     }
 
 
