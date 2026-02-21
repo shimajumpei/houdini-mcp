@@ -2383,10 +2383,10 @@ def configure_foot_planting(
     if agent_parent is None:
         return {"status": "error", "message": f"Agent setup not found: {agent_setup_path}"}
 
-    # Find agentprep node
+    # Find agentprep node (may be versioned, e.g. "agentprep::3.0")
     prep_node = None
     for child in agent_parent.children():
-        if child.type().name() == "agentprep":
+        if child.type().name().startswith("agentprep"):
             prep_node = child
             break
 
