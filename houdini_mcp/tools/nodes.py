@@ -75,6 +75,7 @@ def get_node_info(
     include_errors: bool = False,
     force_cook: bool = False,
     compact: bool = False,
+    include_description_ja: bool = False,
     host: str = "localhost",
     port: int = 18811,
 ) -> Dict[str, Any]:
@@ -90,6 +91,7 @@ def get_node_info(
         include_errors: When True, include cook state and error/warning information
         force_cook: When True, force cook the node before checking errors (requires include_errors=True)
         compact: When True, return minimal info (path, type, counts only)
+        include_description_ja: When True, include Japanese descriptions from local help files
 
     Returns:
         Dict with node information. When include_errors=True, also includes cook_info
@@ -175,6 +177,37 @@ def get_node_info(
             except Exception:
                 params[parm.name()] = "<unable to evaluate>"
         info["parameters"] = params
+
+    # Add Japanese descriptions from local help files
+    if include_description_ja:
+        try:
+            from .help_local import get_local_help
+
+            node_type = node.type()
+            category_name = node_type.category().name()
+            type_name = node_type.name()
+            parsed_help = get_local_help(category_name, type_name)
+            if parsed_help is not None:
+                if parsed_help.summary_ja:
+                    info["description_ja"] = parsed_help.summary_ja
+                # Build parameter descriptions dict
+                if include_params:
+                    parm_descs: Dict[str, str] = {}
+                    for parm_name_key in params:
+                        if parm_name_key.startswith("_"):
+                            continue
+                        try:
+                            parm_obj = node.parm(parm_name_key)
+                            parm_label = parm_obj.parmTemplate().label() if parm_obj else ""
+                        except Exception:
+                            parm_label = ""
+                        help_entry = parsed_help.lookup(parm_name_key, parm_label)
+                        if help_entry and help_entry.description_ja:
+                            parm_descs[parm_name_key] = help_entry.description_ja
+                    if parm_descs:
+                        info["parameter_descriptions_ja"] = parm_descs
+        except Exception as e:
+            logger.debug(f"Could not load Japanese help for {node_path}: {e}")
 
     # Add cook info if requested
     if include_errors:

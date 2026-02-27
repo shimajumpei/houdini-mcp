@@ -30,6 +30,7 @@ from .code import execute_code, get_last_scene_diff
 from .scene import get_scene_info, save_scene, load_scene, new_scene, serialize_scene
 from .hscript import HscriptBatch, get_batch, fast_list_paths, fast_get_scene_tree
 from .cache import node_type_cache, invalidate_all_caches, get_cache_stats
+from .help_local import get_local_help, invalidate_help_cache
 from .summarization import (
     summarize_geometry,
     summarize_errors,
@@ -138,6 +139,8 @@ __all__ = [
     "execute_code",
     # Help/documentation
     "get_houdini_help",
+    "get_local_help",
+    "invalidate_help_cache",
     # Cache management
     "node_type_cache",
     "invalidate_all_caches",

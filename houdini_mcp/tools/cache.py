@@ -443,6 +443,12 @@ def invalidate_all_caches() -> None:
     """
     node_type_cache.invalidate()
     parameter_schema_cache.invalidate()
+    try:
+        from .help_local import invalidate_help_cache
+
+        invalidate_help_cache()
+    except ImportError:
+        pass
     logger.info("All caches invalidated")
 
 

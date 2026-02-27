@@ -195,6 +195,7 @@ def get_parameter_schema(
     node_path: str,
     parm_name: Optional[str] = None,
     max_parms: int = 100,
+    include_description_ja: bool = False,
     host: str = "localhost",
     port: int = 18811,
 ) -> Dict[str, Any]:
@@ -210,6 +211,7 @@ def get_parameter_schema(
         parm_name: Optional specific parameter name. If provided, returns only that parameter.
                   If None, returns all parameters (up to max_parms)
         max_parms: Maximum number of parameters to return when parm_name is None (default: 100)
+        include_description_ja: When True, include Japanese descriptions from local help files
 
     Returns:
         Dict with parameter schema information.
@@ -266,6 +268,19 @@ def get_parameter_schema(
     node = hou.node(node_path)
     if node is None:
         return {"status": "error", "message": f"Node not found: {node_path}"}
+
+    # Load Japanese help data if requested
+    parsed_help = None
+    if include_description_ja:
+        try:
+            from .help_local import get_local_help
+
+            node_type = node.type()
+            category_name = node_type.category().name()
+            type_name = node_type.name()
+            parsed_help = get_local_help(category_name, type_name)
+        except Exception as e:
+            logger.debug(f"Could not load Japanese help for {node_path}: {e}")
 
     parameters: List[Dict[str, Any]] = []
 
@@ -325,7 +340,9 @@ def get_parameter_schema(
             break
 
         try:
-            param_info = _extract_parameter_info(hou, node, parm_template, _json_safe_hou_value)
+            param_info = _extract_parameter_info(
+                hou, node, parm_template, _json_safe_hou_value, parsed_help=parsed_help
+            )
             if param_info is not None:
                 parameters.append(param_info)
         except Exception as e:
@@ -344,7 +361,11 @@ def get_parameter_schema(
 
 
 def _extract_parameter_info(
-    hou: Any, node: Any, parm_template: Any, json_safe_fn: Any
+    hou: Any,
+    node: Any,
+    parm_template: Any,
+    json_safe_fn: Any,
+    parsed_help: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Extract parameter information from a parameter template.
@@ -354,6 +375,7 @@ def _extract_parameter_info(
         node: The node containing the parameter
         parm_template: The parameter template to extract info from
         json_safe_fn: Function to convert hou values to JSON-safe values
+        parsed_help: Optional ParsedNodeHelp for Japanese descriptions
 
     Returns:
         Dict with parameter info, or None if parameter should be skipped
@@ -489,6 +511,18 @@ def _extract_parameter_info(
         param_info["is_animatable"] = is_animatable
     except Exception:
         param_info["is_animatable"] = True  # Default to true
+
+    # Add Japanese description from local help if available
+    if parsed_help is not None:
+        try:
+            help_entry = parsed_help.lookup(param_name, param_label)
+            if help_entry is not None:
+                if help_entry.description_ja:
+                    param_info["description_ja"] = help_entry.description_ja
+                if help_entry.menu_items_ja:
+                    param_info["menu_descriptions_ja"] = help_entry.menu_items_ja
+        except Exception as e:
+            logger.debug(f"Could not lookup help for {param_name}: {e}")
 
     return param_info
 

@@ -169,6 +169,7 @@ def get_node_info(
     include_errors: bool = False,
     force_cook: bool = False,
     compact: bool = False,
+    include_description_ja: bool = False,
 ) -> Dict[str, Any]:
     """
     Get detailed information about a node.
@@ -181,6 +182,7 @@ def get_node_info(
         include_errors: When True, include cook state and error/warning information (default: False)
         force_cook: When True, force cook the node before checking errors (default: False)
         compact: When True, return minimal info (path, type, counts only) for reduced payload (default: False)
+        include_description_ja: When True, include Japanese descriptions from local help files (default: False)
 
     Returns:
         Node information including type, children, connections, flags, and parameters.
@@ -188,6 +190,8 @@ def get_node_info(
         showing source nodes and output indices for each connection.
         When include_errors=True, also includes cook_info with cook_state, errors, and warnings.
         When compact=True, returns only path, type, and child/input/output counts.
+        When include_description_ja=True, also includes description_ja (node summary) and
+        parameter_descriptions_ja dict mapping parameter names to Japanese descriptions.
 
     Example:
         # Get node info with cook state and errors
@@ -198,6 +202,9 @@ def get_node_info(
 
         # Get minimal info for reduced payload
         get_node_info("/obj/geo1/sphere1", compact=True)
+
+        # Get node info with Japanese descriptions
+        get_node_info("/obj/geo1/box1", include_description_ja=True)
     """
     return tools.get_node_info(
         node_path=node_path,
@@ -207,6 +214,7 @@ def get_node_info(
         include_errors=include_errors,
         force_cook=force_cook,
         compact=compact,
+        include_description_ja=include_description_ja,
         host=HOUDINI_HOST,
         port=HOUDINI_PORT,
     )
@@ -835,7 +843,10 @@ def reorder_inputs(node_path: str, new_order: List[int]) -> Dict[str, Any]:
 
 @mcp.tool()
 def get_parameter_schema(
-    node_path: str, parm_name: Optional[str] = None, max_parms: int = 100
+    node_path: str,
+    parm_name: Optional[str] = None,
+    max_parms: int = 100,
+    include_description_ja: bool = False,
 ) -> Dict[str, Any]:
     """
     Get parameter metadata/schema for intelligent parameter setting.
@@ -849,6 +860,7 @@ def get_parameter_schema(
         parm_name: Optional specific parameter name. If provided, returns only that parameter's schema.
                   If None, returns schema for all parameters (up to max_parms)
         max_parms: Maximum number of parameters to return when parm_name is None (default: 100)
+        include_description_ja: When True, include Japanese descriptions from local help files (default: False)
 
     Returns:
         Dict containing parameter schemas with type information, defaults, ranges, and current values.
@@ -863,6 +875,8 @@ def get_parameter_schema(
         - tuple_size: Size for vector parameters
         - is_animatable: Whether parameter can be keyframed
         - current_value: Current parameter value
+        - description_ja: Japanese description (when include_description_ja=True)
+        - menu_descriptions_ja: Japanese menu item descriptions (when include_description_ja=True)
 
     Examples:
         # Get all parameters on a sphere
@@ -873,8 +887,13 @@ def get_parameter_schema(
 
         # Get info for translate parameter (vector)
         get_parameter_schema("/obj/geo1", parm_name="t")
+
+        # Get parameters with Japanese descriptions
+        get_parameter_schema("/obj/geo1/box1", include_description_ja=True)
     """
-    return tools.get_parameter_schema(node_path, parm_name, max_parms, HOUDINI_HOST, HOUDINI_PORT)
+    return tools.get_parameter_schema(
+        node_path, parm_name, max_parms, include_description_ja, HOUDINI_HOST, HOUDINI_PORT
+    )
 
 
 @mcp.tool()
@@ -1953,7 +1972,10 @@ def run_server(transport: str = "http", port: int = 3055) -> None:
     if transport in ("stdio", "http", "sse", "streamable-http"):
         transport_literal = transport  # type: ignore
 
-    mcp.run(transport=transport_literal, host="0.0.0.0", port=port)
+    if transport_literal == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport=transport_literal, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
