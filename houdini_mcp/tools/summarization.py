@@ -19,7 +19,14 @@ logger = logging.getLogger("houdini_mcp.summarization")
 # Configuration
 CLAUDE_PROXY_URL = os.getenv("CLAUDE_PROXY_URL", "http://localhost:8082")
 SUMMARIZATION_MODEL = os.getenv("SUMMARIZATION_MODEL", "claude-3-5-haiku-latest")
-SUMMARIZATION_ENABLED = os.getenv("SUMMARIZATION_ENABLED", "true").lower() == "true"
+# Summarization needs a Claude API proxy. Default ON only when the proxy URL
+# was explicitly configured; otherwise every summarize=True call would burn a
+# connection attempt against a proxy that does not exist on this machine.
+_PROXY_CONFIGURED = "CLAUDE_PROXY_URL" in os.environ
+SUMMARIZATION_ENABLED = (
+    os.getenv("SUMMARIZATION_ENABLED", "true" if _PROXY_CONFIGURED else "false").lower()
+    == "true"
+)
 
 # Thresholds for automatic summarization (in estimated tokens)
 AUTO_SUMMARIZE_THRESHOLD = int(os.getenv("AUTO_SUMMARIZE_THRESHOLD", "5000"))

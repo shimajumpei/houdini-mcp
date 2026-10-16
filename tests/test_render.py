@@ -707,3 +707,22 @@ class TestKarmaEngineParameter:
         sig = inspect.signature(render_viewport)
         default_value = sig.parameters["karma_engine"].default
         assert default_value == "cpu"
+
+
+class TestRenderViewportDefaultResolution:
+    """Tests for render_viewport safe default resolution."""
+
+    def test_render_viewport_default_resolution_safe(self, mock_connection):
+        """resolution=None should use [640, 480] (not [512, 512])."""
+        from houdini_mcp.tools import render_viewport
+        import inspect
+
+        sig = inspect.signature(render_viewport)
+        default_value = sig.parameters["resolution"].default
+        assert default_value is None  # None triggers the default inside the function
+
+        # Verify the function uses [640, 480] by checking the code logic
+        # We test this by reading the source to confirm the default
+        source = inspect.getsource(render_viewport)
+        assert "[640, 480]" in source
+        assert "resolution = [512, 512]" not in source

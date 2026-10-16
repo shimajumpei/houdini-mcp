@@ -41,6 +41,9 @@ __all__ = [
     # Code safety
     "DANGEROUS_PATTERNS",
     "_detect_dangerous_code",
+    "HEAVY_CODE_PATTERNS",
+    "_detect_heavy_code",
+    "_strip_hou_import",
     # Output utilities
     "_truncate_output",
     # Response size utilities
@@ -258,6 +261,74 @@ def _detect_dangerous_code(code: str) -> List[str]:
         if re.search(pattern, code):
             detected.append(description)
     return detected
+
+
+# Heavy/slow code patterns that may cause timeout or excessive memory usage
+HEAVY_CODE_PATTERNS: List[Tuple[str, str, str]] = [
+    (r"\bgeo\.points\s*\(\s*\)", "geo.points() — full point list fetch",
+     "Use get_geo_summary(max_sample_points=100) or iterPoints with islice"),
+    (r"\blist\s*\(\s*geo\.points\s*\(\s*\)\s*\)", "list(geo.points()) — materializes all points",
+     "Use get_geo_summary() or sample with geo.iterPoints()"),
+    (r"\bgeo\.prims\s*\(\s*\)", "geo.prims() — full prim list fetch",
+     "Use get_geo_summary() or geo.iterPrims() with islice"),
+    (r"\blist\s*\(\s*geo\.prims\s*\(\s*\)\s*\)", "list(geo.prims()) — materializes all prims",
+     "Use get_geo_summary() or sample a few prims"),
+    (r"\.allVoxels\s*\(", ".allVoxels() — fetches entire voxel grid",
+     "Use volume.voxel(x,y,z) for specific values or get_geo_summary()"),
+    (r"for\s+\w+\s+in\s+geo\.points\s*\(\s*\)", "Iterating all points — may be slow on large geo",
+     "Use itertools.islice(geo.iterPoints(), N) for sampling"),
+    (r"for\s+\w+\s+in\s+geo\.prims\s*\(\s*\)", "Iterating all prims — may be slow on large geo",
+     "Use itertools.islice(geo.iterPrims(), N) for sampling"),
+    (r"\.attribValue\s*\(.*\)\s*for\s+\w+\s+in", "attribValue in loop — O(N) RPyC calls",
+     "Use geo.pointFloatAttribValues('name') for bulk read, or get_geo_summary()"),
+]
+
+
+def _detect_heavy_code(code: str) -> List[Dict[str, str]]:
+    """Scan code for patterns likely to cause timeout/hang.
+
+    Args:
+        code: Python code to scan
+
+    Returns:
+        List of dicts with 'pattern', 'description', and 'suggestion' keys.
+    """
+    detected: List[Dict[str, str]] = []
+    for pattern, description, suggestion in HEAVY_CODE_PATTERNS:
+        if re.search(pattern, code):
+            detected.append({
+                "pattern": description,
+                "suggestion": suggestion,
+            })
+    return detected
+
+
+_HOU_IMPORT_RE = re.compile(
+    r"^[ \t]*(import\s+hou|from\s+hou\s+import\s+\S+)[ \t]*(?:#.*)?\n?",
+    re.MULTILINE,
+)
+
+
+def _strip_hou_import(code: str) -> Tuple[str, List[str]]:
+    """Remove ``import hou`` / ``from hou import ...`` lines from code.
+
+    The ``hou`` module is pre-injected into the exec namespace, so explicit
+    imports are unnecessary and will cause ``ModuleNotFoundError``.
+
+    Args:
+        code: Python code string.
+
+    Returns:
+        (cleaned_code, list_of_removed_lines)
+    """
+    removed: List[str] = []
+
+    def _replacer(m: re.Match) -> str:
+        removed.append(m.group(0).strip())
+        return ""
+
+    cleaned = _HOU_IMPORT_RE.sub(_replacer, code)
+    return cleaned, removed
 
 
 def _truncate_output(output: str, max_size: int) -> Tuple[str, bool]:

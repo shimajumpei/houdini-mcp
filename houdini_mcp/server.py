@@ -76,6 +76,7 @@ def execute_code(
     max_diff_nodes: int = 1000,
     timeout: int = 30,
     allow_dangerous: bool = False,
+    allow_heavy: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute Python code in Houdini with scene change tracking and safety rails.
@@ -85,6 +86,9 @@ def execute_code(
 
     SAFETY FEATURES:
     - Dangerous operation detection: Scans for patterns like hou.exit(), os.remove(), subprocess, etc.
+    - Heavy pattern detection: Scans for patterns that cause timeout/hang on large geometry
+      (e.g. geo.points(), list(geo.prims()), .allVoxels(), attribValue in loop).
+      Blocked by default; set allow_heavy=True to override.
     - Output size caps: Prevents massive output from overwhelming the response
     - Execution timeout: Prevents runaway code from blocking indefinitely
     - Scene diff limits: Caps the number of nodes returned in scene changes
@@ -97,6 +101,8 @@ def execute_code(
         max_diff_nodes: Maximum nodes in scene diff added_nodes list (default: 1000)
         timeout: Execution timeout in seconds (default: 30)
         allow_dangerous: If True, allows code with dangerous patterns to execute (default: False)
+        allow_heavy: If True, allows code with heavy patterns (geo.points() etc.) to execute (default: False).
+            When blocked, the response includes specific lightweight alternatives.
 
     Dangerous patterns detected:
         - hou.exit() - closes Houdini
@@ -105,6 +111,12 @@ def execute_code(
         - subprocess, os.system() - shell execution
         - open() with write modes - file writing
         - hou.hipFile.clear() - scene wipe
+
+    Heavy patterns detected (blocked unless allow_heavy=True):
+        - geo.points() / geo.prims() — full list fetch, may hang on large geo
+        - .allVoxels() — fetches entire voxel grid
+        - attribValue() in loop — O(N) RPyC calls
+        Use get_geo_summary(max_sample_points=N) or itertools.islice() instead.
 
     Example:
         execute_code('''
@@ -120,7 +132,8 @@ def execute_code(
         Dict with status, stdout, stderr, and scene_changes (if capture_diff=True).
         May include truncation flags (stdout_truncated, stderr_truncated, diff_truncated)
         if output exceeded size limits.
-        If dangerous patterns detected and not allowed, returns error with detected patterns.
+        If dangerous/heavy patterns detected and not allowed, returns error with detected patterns
+        and suggested alternatives.
     """
     return tools.execute_code(
         code=code,
@@ -130,6 +143,7 @@ def execute_code(
         max_diff_nodes=max_diff_nodes,
         timeout=timeout,
         allow_dangerous=allow_dangerous,
+        allow_heavy=allow_heavy,
         host=HOUDINI_HOST,
         port=HOUDINI_PORT,
     )
@@ -446,12 +460,18 @@ def render_viewport(
         camera_position: [x, y, z] world position for camera (default: auto-calculated)
         camera_rotation: [rx, ry, rz] rotation in degrees (default: [-30, 45, 0] isometric)
         look_at: Node path to look at (centers camera on this node's geometry)
-        resolution: [width, height] in pixels (default: [512, 512])
+        resolution: [width, height] in pixels (default: [640, 480])
         renderer: Render engine - "opengl" (fast) or "karma" (quality)
         output_format: Image format - "png", "jpg", or "exr"
         auto_frame: If True, automatically frame all visible geometry (default: True)
         orthographic: If True, use orthographic projection (default: False)
         karma_engine: Karma render engine - "cpu" (quality) or "gpu" (fast XPU). Only used when renderer="karma"
+
+    Note:
+        render_viewport does not accept a save_path parameter.
+        To save a rendered image to a file, use capture_pane_screenshot(save_path=...)
+        which writes directly to the Houdini host filesystem.
+        Check the tool's parameter schema for the full list of accepted arguments.
 
     Returns:
         Dict with:
@@ -1959,6 +1979,422 @@ def configure_foot_planting(
         agent_setup_path, ankle_joint, toe_joint, upper_leg_joint, knee_joint,
         enable_foot_locking, adjust_hips, HOUDINI_HOST, HOUDINI_PORT,
     )
+
+
+# =============================================================================
+# Workflow Management Tools
+# =============================================================================
+
+
+@mcp.tool()
+def ensure_project(project_root: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Initialize or verify the .agent/ workflow management directory.
+
+    Auto-bootstraps a new .agent/ directory with template files if it doesn't exist.
+    Repairs partial setups by creating any missing files. Includes a readiness check
+    to determine if spec.md and stages.yaml are sufficiently defined for implementation.
+
+    Args:
+        project_root: Optional path to the project root directory.
+            If not provided, uses the current working directory.
+
+    Returns:
+        Dict with:
+        - status: "success" or "error"
+        - project_root: Resolved project root path
+        - bootstrapped: True if .agent/ was created from scratch
+        - repaired_files: List of files that were repaired/created
+        - ready_for_implementation: Whether spec and stages are defined
+        - missing_requirements: List of missing items preventing readiness
+        - next_action: Suggested next step if not ready
+        - active_stage: Currently active stage ID or null
+        - stage_summary: Map of stage_id -> status
+
+    Examples:
+        ensure_project()
+        ensure_project("/path/to/project")
+    """
+    return tools.workflow_ensure_project(project_root)
+
+
+@mcp.tool()
+def read_project(
+    target: str = "all",
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Read project configuration files as structured data.
+
+    Reads spec.md, stages.yaml, contracts.yaml, and/or build_state.json
+    and returns their contents in a structured format. Always includes
+    readiness check information.
+
+    Args:
+        target: What to read:
+            - "spec": Project specification (Markdown)
+            - "stages": Workflow stages (YAML parsed to dict)
+            - "contracts": Artifact contracts (YAML parsed to dict)
+            - "build_state": Current build state (JSON parsed to dict)
+            - "all": All of the above
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with requested data plus readiness info
+
+    Examples:
+        read_project("spec")
+        read_project("build_state")
+        read_project("all")
+    """
+    return tools.workflow_read_project(target, project_root)
+
+
+@mcp.tool()
+def plan_stage(
+    stage_id: str,
+    description: str,
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a plan for a workflow stage and start it.
+
+    Writes a plan file to .agent/stage_plans/{stage_id}.md and transitions
+    the stage from 'pending' to 'in_progress'. Refuses if the project is
+    not ready for implementation (spec/stages not defined).
+
+    Args:
+        stage_id: Stage ID matching an entry in stages.yaml
+        description: Markdown description of what this stage will do
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with plan file path and updated stage status
+
+    Examples:
+        plan_stage("S01", "## Create base terrain\\n- Add heightfield\\n- Apply noise")
+    """
+    return tools.workflow_plan_stage(stage_id, description, project_root)
+
+
+@mcp.tool()
+def record_scan(
+    scan_data: Dict[str, Any],
+    stage_id: Optional[str] = None,
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Record a Houdini scene scan result.
+
+    Saves the output from get_scene_info, serialize_scene, or similar
+    Houdini MCP tools as a timestamped JSON file in .agent/scene_scans/.
+
+    Args:
+        scan_data: Scene data from Houdini MCP tools (e.g., get_scene_info output)
+        stage_id: Optional stage to associate the scan with.
+            If not provided, uses the active stage.
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with scan file path
+
+    Examples:
+        record_scan({"nodes": [...], "hip_file": "scene.hip"})
+        record_scan(scene_info, stage_id="S01")
+    """
+    return tools.workflow_record_scan(scan_data, stage_id, project_root)
+
+
+@mcp.tool()
+def validate_stage(
+    stage_id: str,
+    mode: str = "light",
+    scan_data: Optional[Dict[str, Any]] = None,
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Run validation checks on a workflow stage.
+
+    Light mode checks (default):
+    1. Plan file exists for the stage
+    2. A scene scan has been recorded
+    3. Artifact contracts are satisfied (future)
+    4. All dependency stages are completed
+
+    Strict mode adds:
+    5. Acceptance criteria defined for the stage
+    6. Definition of Done in spec.md is non-placeholder
+
+    Use "strict" for normal stages before completion.
+    Use "light" for spike stages or quick checks.
+
+    Args:
+        stage_id: Stage ID to validate
+        mode: Validation mode: "light" (default) or "strict"
+        scan_data: Optional fresh scan data (currently unused)
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with:
+        - passed: Overall pass/fail
+        - mode: Validation mode used
+        - checks: List of individual check results
+
+    Examples:
+        validate_stage("S01")
+        validate_stage("S01", mode="strict")
+    """
+    return tools.workflow_validate_stage(stage_id, mode, scan_data, project_root)
+
+
+@mcp.tool()
+def update_stage(
+    stage_id: str,
+    status: str,
+    reason: Optional[str] = None,
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Update a workflow stage's status with transition rule enforcement.
+
+    Enforces the state machine: pending -> in_progress -> validated -> completed.
+    Failed stages can return to in_progress. Setting 'validated' requires a
+    passing validation. Setting 'completed' requires 'validated' status.
+
+    Args:
+        stage_id: Stage ID to update
+        status: Target status: "pending", "in_progress", "validated",
+            "failed", or "completed"
+        reason: Optional reason for the transition
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with previous and new status
+
+    Examples:
+        update_stage("S01", "validated")
+        update_stage("S01", "completed")
+        update_stage("S01", "failed", reason="Node connections broken")
+    """
+    return tools.workflow_update_stage(stage_id, status, reason, project_root)
+
+
+@mcp.tool()
+def propose_diff(
+    stage_id: str,
+    diff_spec: Dict[str, Any],
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Propose a set of changes for approval before execution.
+
+    Creates a structured diff proposal that must be approved via approve_diff()
+    before change tools (create_node, set_parameter, etc.) can be used.
+    This enforces the "diff proposal → user OK → execute" workflow.
+
+    Args:
+        stage_id: Stage ID this diff belongs to (must be the active in-progress stage)
+        diff_spec: Dict describing planned changes:
+            - nodes_to_add: list of {type, name, parent_path}
+            - nodes_to_delete: list of node_paths to remove
+            - connections_to_add: list of {src_path, dst_path, dst_input_index, src_output_index}
+            - connections_to_remove: list of {node_path, input_index}
+            - params_to_change: list of {node_path, param_name, value}
+            - scope: affected network paths (string)
+            - rationale: why this change is needed (string)
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with diff_id to use in approve_diff
+
+    Examples:
+        propose_diff("S01", {
+            "nodes_to_add": [{"type": "sphere", "name": "sphere1", "parent_path": "/obj/geo1"}],
+            "params_to_change": [{"node_path": "/obj/geo1/sphere1", "param_name": "radx", "value": 2.0}],
+            "scope": "/obj/geo1",
+            "rationale": "Add sphere with custom radius for base shape"
+        })
+    """
+    return tools.workflow_propose_diff(stage_id, diff_spec, project_root)
+
+
+@mcp.tool()
+def approve_diff(
+    diff_id: str,
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Approve a pending diff proposal, unlocking change tools.
+
+    After a diff is proposed via propose_diff() and the user has reviewed
+    and approved it, call this to unlock change tools. Without approval,
+    all Houdini change tools will be blocked by the PreToolUse hook.
+
+    Args:
+        diff_id: The diff ID returned by propose_diff
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with approval confirmation
+
+    Examples:
+        approve_diff("S01_20260228_abc123de")
+    """
+    return tools.workflow_approve_diff(diff_id, project_root)
+
+
+@mcp.tool()
+def safe_set_parameter(
+    node_path: str,
+    param_name: str,
+    value: Union[float, int, str, bool, List[float], List[int], List[str]],
+    diff_id: str,
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Set a parameter with automatic schema validation and Japanese help.
+
+    Combines get_parameter_schema(include_description_ja=True) + validation +
+    set_parameter into a single safe operation. Validates:
+    1. Parameter exists in node's schema
+    2. Value type matches schema type
+    3. Menu values are valid options
+    4. Value is within min/max range
+    5. Diff is approved
+
+    Preferred over raw set_parameter. Raw set_parameter is blocked by the
+    PreToolUse hook unless get_parameter_schema was called first.
+
+    Args:
+        node_path: Full path to the node (e.g., "/obj/geo1/sphere1")
+        param_name: Parameter name from schema (e.g., "radx")
+        value: Value to set (type must match schema)
+        diff_id: Approved diff ID from approve_diff
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with status, validated schema info, and set result
+
+    Examples:
+        safe_set_parameter("/obj/geo1/sphere1", "radx", 2.5, "S01_20260228_abc123de")
+    """
+    return tools.workflow_safe_set_parameter(
+        node_path, param_name, value, diff_id, project_root,
+        HOUDINI_HOST, HOUDINI_PORT,
+    )
+
+
+@mcp.tool()
+def update_spec_and_stages(
+    change_summary: str,
+    spec_patch: Optional[Dict[str, Any]] = None,
+    stages_patch: Optional[Dict[str, Any]] = None,
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Update spec.md and/or stages.yaml with change tracking.
+
+    Supports atomic updates with automatic changelog, event recording,
+    and optional ADR (Architecture Decision Record) creation.
+
+    Use this tool when:
+    - Changing direction mid-project (VEX→OpenCL, Volume→Grid, etc.)
+    - Adding/modifying stages for agile iteration
+    - Recording architectural decisions
+    - Updating spec sections (Definition of Done, Requirements, etc.)
+
+    Args:
+        change_summary: Human-readable summary of the change.
+        spec_patch: Optional spec.md modifications:
+            - changelog_entry: {reason: str, impact: str}
+            - section_updates: {section_name: new_content}
+            - dod_append: str (appends to Definition of Done)
+            - decision: {context, decision, alternatives, consequences}
+        stages_patch: Optional stages.yaml modifications:
+            - add_stage: {id, name, purpose, depends_on, produces, consumes,
+                          mode, notes, replaces, parallel_with, acceptance}
+            - update_stage: {id, ...fields_to_update}
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with files_updated list and change_summary
+
+    Examples:
+        update_spec_and_stages(
+            "Switch solver approach from VEX to OpenCL",
+            spec_patch={"changelog_entry": {"reason": "Performance", "impact": "S02 rebuilt"}},
+            stages_patch={"add_stage": {"id": "S02b", "name": "OpenCL Solver", "purpose": "GPU solver", "depends_on": ["S01"], "produces": ["volume"], "consumes": ["heightfield"], "mode": "spike"}}
+        )
+    """
+    return tools.workflow_update_spec_and_stages(
+        change_summary, spec_patch, stages_patch, project_root,
+    )
+
+
+@mcp.tool()
+def record_norm_check(
+    kind: str,
+    summary: str,
+    impact: str,
+    reason: Optional[str] = None,
+    links: Optional[str] = None,
+    also_record_decision: bool = False,
+    project_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Record a norm check result (e.g. NotebookLM sanity check).
+
+    Records whether a non-mandatory sanity check was consulted or skipped,
+    leaving a traceable footprint in events.jsonl and CHANGELOG.md.
+    This is a lightweight, non-blocking record — no gate enforcement.
+
+    Args:
+        kind: Norm type identifier. Use "notebooklm" for NotebookLM checks.
+        summary: One-line summary of the check result or question asked.
+        impact: Outcome of the check:
+            - "adopt": Findings applied to current approach
+            - "hold": Noted for later consideration
+            - "reject": Reviewed but not applicable
+            - "skipped": Check was not performed (use reason to explain why)
+        reason: Why the check was skipped (when impact is "skipped").
+            Common values: "low-risk", "confirmed-by-docs", "timebox", "other"
+        links: Optional memo — notebook ID, reference note, etc.
+        also_record_decision: If True, also creates an ADR entry in DECISIONS.md.
+            Default False to keep things lightweight.
+        project_root: Optional project root path. Defaults to cwd.
+
+    Returns:
+        Dict with:
+        - status: "success", "skipped", or "error"
+        - event_id: Generated event ID (when successful)
+        - impact: The recorded impact value
+        - recorded_to: List of files written to (e.g. ["events", "changelog"])
+
+    Examples:
+        record_norm_check("notebooklm", "Volume migration uses voxel O(1) access", "adopt")
+        record_norm_check("notebooklm", "Parameter check", "skipped", reason="confirmed-by-docs")
+    """
+    return tools.workflow_record_norm_check(
+        kind, summary, impact, reason, links, also_record_decision, project_root,
+    )
+
+
+@mcp.tool()
+def doctor() -> Dict[str, Any]:
+    """
+    Run a full environment diagnosis for the Houdini MCP system.
+
+    Checks the whole chain in dependency order: Python env, rpyc version,
+    houdini_mcp install, Houdini process, RPC port, RPC roundtrip, and
+    Houdini-side package install. Each failing check includes a concrete
+    fix instruction, and the summary names the first failure to fix.
+
+    Read-only and safe to call anytime -- works even when Houdini is down.
+    Use this first whenever the connection misbehaves.
+    """
+    from .doctor import run_doctor
+
+    return run_doctor(HOUDINI_HOST, HOUDINI_PORT)
 
 
 def run_server(transport: str = "http", port: int = 3055) -> None:

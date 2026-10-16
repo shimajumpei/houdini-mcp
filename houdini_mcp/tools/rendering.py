@@ -189,12 +189,18 @@ def render_viewport(
         camera_position: [x, y, z] world position for camera (default: auto-calculated)
         camera_rotation: [rx, ry, rz] rotation in degrees (default: [-30, 45, 0] isometric)
         look_at: Node path to look at (centers camera on this node's geometry)
-        resolution: [width, height] in pixels (default: [512, 512])
+        resolution: [width, height] in pixels (default: [640, 480])
         renderer: Render engine - "opengl" (fast) or "karma" (quality)
         output_format: Image format - "png", "jpg", or "exr"
         auto_frame: If True, automatically frame all visible geometry (default: True)
         orthographic: If True, use orthographic projection (default: False)
         karma_engine: Karma render engine - "cpu" (quality) or "gpu" (fast XPU). Only used when renderer="karma"
+
+    Note:
+        render_viewport does not accept a save_path parameter.
+        To save a rendered image to a file, use capture_pane_screenshot(save_path=...)
+        which writes directly to the Houdini host filesystem.
+        Check the tool's parameter schema for the full list of accepted arguments.
 
     Returns:
         Dict with:
@@ -217,7 +223,7 @@ def render_viewport(
 
         # Set defaults
         if resolution is None:
-            resolution = [512, 512]
+            resolution = [640, 480]
         if camera_rotation is None:
             camera_rotation = [-30.0, 45.0, 0.0]  # Isometric view
 

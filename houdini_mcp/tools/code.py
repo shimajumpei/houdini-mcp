@@ -15,6 +15,8 @@ from ._common import (
     ensure_connected,
     handle_connection_errors,
     _detect_dangerous_code,
+    _detect_heavy_code,
+    _strip_hou_import,
     _truncate_output,
     _serialize_scene_state,
     _get_scene_diff,
@@ -36,6 +38,7 @@ def execute_code(
     max_diff_nodes: int = 1000,
     timeout: int = 30,
     allow_dangerous: bool = False,
+    allow_heavy: bool = False,
     host: str = "localhost",
     port: int = 18811,
 ) -> Dict[str, Any]:
@@ -50,6 +53,9 @@ def execute_code(
         max_diff_nodes: Maximum number of nodes in scene diff added_nodes (default: 1000)
         timeout: Execution timeout in seconds (default: 30). Note: May be limited by RPyC.
         allow_dangerous: If True, allows execution of code with dangerous patterns (default: False)
+        allow_heavy: If True, allows execution of code with heavy patterns (default: False).
+            When False, code with heavy patterns (e.g. geo.points()) is blocked.
+            When True, a warning is included in the response but execution proceeds.
 
     Returns:
         Dict with execution result including stdout/stderr and scene changes.
@@ -57,7 +63,7 @@ def execute_code(
         - stdout_truncated: True if stdout was truncated
         - stderr_truncated: True if stderr was truncated
         - diff_truncated: True if scene diff was truncated
-        May include warnings for dangerous patterns even when allowed.
+        May include warnings for dangerous or heavy patterns when allowed.
     """
     global _before_scene, _after_scene
 
@@ -79,6 +85,23 @@ def execute_code(
             "dangerous_patterns": dangerous_patterns,
             "hint": "Set allow_dangerous=True to proceed with execution",
         }
+
+    # 1.2 Scan for heavy/slow patterns
+    heavy_patterns = _detect_heavy_code(code)
+    if heavy_patterns and not allow_heavy:
+        return {
+            "status": "error",
+            "message": "Code contains patterns likely to cause timeout or excessive memory usage.",
+            "heavy_patterns": heavy_patterns,
+            "alternatives": [h["suggestion"] for h in heavy_patterns],
+            "hint": (
+                "Use get_geo_summary(max_sample_points=N) for geometry inspection, "
+                "or set allow_heavy=True to proceed anyway."
+            ),
+        }
+
+    # 1.5 Strip unnecessary 'import hou' lines (hou is pre-injected)
+    code, removed_imports = _strip_hou_import(code)
 
     hou = ensure_connected(host, port)
 
@@ -238,6 +261,12 @@ def execute_code(
             error_result["stdout_truncated"] = True
         if stderr_truncated:
             error_result["stderr_truncated"] = True
+        if removed_imports:
+            error_result["removed_imports"] = removed_imports
+            error_result["import_warning"] = (
+                "'hou' module is pre-injected. "
+                f"Removed: {', '.join(removed_imports)}"
+            )
         return error_result
 
     # 3. Process and truncate outputs if needed
@@ -279,6 +308,22 @@ def execute_code(
         result["dangerous_patterns_executed"] = dangerous_patterns
         result["safety_warning"] = (
             "Code with dangerous patterns was executed with allow_dangerous=True"
+        )
+
+    # Include warnings for heavy patterns even when allowed
+    if heavy_patterns and allow_heavy:
+        result["heavy_patterns_executed"] = heavy_patterns
+        result["heavy_warning"] = (
+            "Code with heavy patterns was executed with allow_heavy=True. "
+            "Consider using get_geo_summary() for large geometry."
+        )
+
+    # Include import hou removal warning
+    if removed_imports:
+        result["removed_imports"] = removed_imports
+        result["import_warning"] = (
+            "'hou' module is pre-injected. "
+            f"Removed: {', '.join(removed_imports)}"
         )
 
     return result

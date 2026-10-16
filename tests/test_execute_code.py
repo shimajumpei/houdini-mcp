@@ -410,3 +410,138 @@ print(c.increment())
         result = execute_code(code, host="localhost", port=18811)
         assert result["status"] == "success"
         assert "[0, 1, 4, 9, 16]" in result["stdout"]
+
+
+class TestStripHouImport:
+    """Tests for _strip_hou_import and execute_code import hou guard."""
+
+    def test_strips_import_hou(self):
+        """import hou line is removed, other code preserved."""
+        from houdini_mcp.tools._common import _strip_hou_import
+
+        code = "import hou\nhou.node('/obj')\n"
+        cleaned, removed = _strip_hou_import(code)
+        assert "import hou" not in cleaned
+        assert "hou.node('/obj')" in cleaned
+        assert len(removed) == 1
+        assert "import hou" in removed[0]
+
+    def test_strips_from_hou_import(self):
+        """from hou import ... line is removed."""
+        from houdini_mcp.tools._common import _strip_hou_import
+
+        code = "from hou import Node\nprint(Node)\n"
+        cleaned, removed = _strip_hou_import(code)
+        assert "from hou import" not in cleaned
+        assert "print(Node)" in cleaned
+        assert len(removed) == 1
+
+    def test_preserves_hou_usage(self):
+        """Lines using hou (not importing) are preserved."""
+        from houdini_mcp.tools._common import _strip_hou_import
+
+        code = "node = hou.node('/obj')\nprint(hou.applicationVersionString())\n"
+        cleaned, removed = _strip_hou_import(code)
+        assert cleaned == code
+        assert removed == []
+
+    def test_strips_with_comment(self):
+        """import hou with trailing comment is removed."""
+        from houdini_mcp.tools._common import _strip_hou_import
+
+        code = "import hou  # needed for scripting\nhou.node('/obj')\n"
+        cleaned, removed = _strip_hou_import(code)
+        assert "import hou" not in cleaned
+        assert "hou.node('/obj')" in cleaned
+        assert len(removed) == 1
+
+    def test_execute_code_returns_import_warning(self, mock_connection):
+        """execute_code strips import hou and returns warning."""
+        from houdini_mcp.tools import execute_code
+
+        code = "import hou\nprint(hou.applicationVersionString())"
+        result = execute_code(code, host="localhost", port=18811)
+        assert result["status"] == "success"
+        assert "removed_imports" in result
+        assert "import_warning" in result
+        assert "pre-injected" in result["import_warning"]
+
+
+class TestDetectHeavyCode:
+    """Tests for the _detect_heavy_code helper and execute_code integration."""
+
+    def test_geo_points_detected(self):
+        """geo.points() is detected as heavy pattern."""
+        from houdini_mcp.tools._common import _detect_heavy_code
+
+        result = _detect_heavy_code("pts = geo.points()")
+        assert len(result) >= 1
+        assert any("geo.points()" in h["pattern"] for h in result)
+
+    def test_list_geo_points_detected(self):
+        """list(geo.points()) is detected as heavy pattern."""
+        from houdini_mcp.tools._common import _detect_heavy_code
+
+        result = _detect_heavy_code("all_pts = list(geo.points())")
+        assert len(result) >= 1
+        assert any("materializes" in h["pattern"] for h in result)
+
+    def test_all_voxels_detected(self):
+        """.allVoxels() is detected as heavy pattern."""
+        from houdini_mcp.tools._common import _detect_heavy_code
+
+        result = _detect_heavy_code("data = volume.allVoxels()")
+        assert len(result) >= 1
+        assert any("allVoxels" in h["pattern"] for h in result)
+
+    def test_attrib_loop_detected(self):
+        """attribValue in a loop is detected."""
+        from houdini_mcp.tools._common import _detect_heavy_code
+
+        code = "[pt.attribValue('Cd') for pt in geo.points()]"
+        result = _detect_heavy_code(code)
+        assert len(result) >= 1
+        assert any("attribValue" in h["pattern"] for h in result)
+
+    def test_lightweight_code_passes(self):
+        """Safe lightweight code is not flagged."""
+        from houdini_mcp.tools._common import _detect_heavy_code
+
+        code = "print(geo.intrinsicValue('pointcount'))"
+        result = _detect_heavy_code(code)
+        assert result == []
+
+    def test_islice_iterpoints_not_flagged(self):
+        """itertools.islice(geo.iterPoints(), N) is NOT flagged (false-positive guard)."""
+        from houdini_mcp.tools._common import _detect_heavy_code
+
+        code = "from itertools import islice\nsampled = list(islice(geo.iterPoints(), 100))"
+        result = _detect_heavy_code(code)
+        assert result == []
+
+    def test_execute_code_returns_heavy_error(self, mock_connection):
+        """execute_code blocks code containing heavy patterns by default."""
+        from houdini_mcp.tools import execute_code
+
+        result = execute_code("pts = geo.points()", host="localhost", port=18811)
+        assert result["status"] == "error"
+        assert "heavy_patterns" in result
+        assert "alternatives" in result
+        assert "timeout" in result["message"].lower() or "memory" in result["message"].lower()
+        assert "hint" in result
+        assert "allow_heavy" in result["hint"]
+
+    def test_execute_code_allows_heavy_with_flag(self, mock_connection):
+        """execute_code allows heavy patterns when allow_heavy=True, with warning."""
+        from houdini_mcp.tools import execute_code
+
+        result = execute_code(
+            "print('would call geo.points()')",
+            allow_heavy=True,
+            host="localhost",
+            port=18811,
+        )
+        # The code itself is safe to execute (just a print), but contains the pattern
+        assert result["status"] == "success"
+        if result.get("heavy_patterns_executed"):
+            assert "heavy_warning" in result

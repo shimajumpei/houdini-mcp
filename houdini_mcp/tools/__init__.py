@@ -55,6 +55,19 @@ from .pane_screenshot import (
     render_node_network,
     VALID_PANE_TYPES,
 )
+from .workflow import (
+    ensure_project as workflow_ensure_project,
+    read_project as workflow_read_project,
+    plan_stage as workflow_plan_stage,
+    record_scan as workflow_record_scan,
+    validate_stage as workflow_validate_stage,
+    update_stage as workflow_update_stage,
+    propose_diff as workflow_propose_diff,
+    approve_diff as workflow_approve_diff,
+    safe_set_parameter as workflow_safe_set_parameter,
+    update_spec_and_stages as workflow_update_spec_and_stages,
+    record_norm_check as workflow_record_norm_check,
+)
 from .crowd import (
     setup_crowd_agent,
     setup_crowd_source,
@@ -81,6 +94,7 @@ from ._common import (
     _add_response_metadata,
     _estimate_response_size,
     _detect_dangerous_code,
+    _detect_heavy_code,
     _truncate_output,
     _node_to_dict,
     _get_scene_diff,
@@ -177,4 +191,15 @@ __all__ = [
     "setup_motion_path",
     "add_steer_weight",
     "configure_foot_planting",
+    # Workflow management
+    "workflow_ensure_project",
+    "workflow_read_project",
+    "workflow_plan_stage",
+    "workflow_record_scan",
+    "workflow_validate_stage",
+    "workflow_update_stage",
+    "workflow_propose_diff",
+    "workflow_approve_diff",
+    "workflow_safe_set_parameter",
+    "workflow_update_spec_and_stages",
 ]

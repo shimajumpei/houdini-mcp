@@ -40,8 +40,9 @@ class TestShouldSummarize:
         small_data = {"count": 10}
         assert summarization.should_summarize(small_data) is False
 
+    @patch.object(summarization, "SUMMARIZATION_ENABLED", True)
     def test_should_summarize_large_data(self):
-        """Test large data triggers summarization."""
+        """Test large data triggers summarization (when enabled)."""
         # Create data larger than threshold (default 5000 tokens = ~20000 chars)
         large_data = {"data": "x" * 30000}
         assert summarization.should_summarize(large_data) is True
@@ -51,6 +52,17 @@ class TestShouldSummarize:
         """Test summarization disabled."""
         large_data = {"data": "x" * 30000}
         assert summarization.should_summarize(large_data) is False
+
+    def test_disabled_by_default_without_proxy_config(self):
+        """Summarization defaults to OFF unless CLAUDE_PROXY_URL is set.
+
+        The proxy (localhost:8082) does not exist on a default install, so
+        large responses must not burn a connection attempt against it.
+        """
+        import os
+
+        if "CLAUDE_PROXY_URL" not in os.environ:
+            assert summarization.SUMMARIZATION_ENABLED is False
 
 
 class TestGetSummarizationStatus:
@@ -78,8 +90,9 @@ class TestCallClaude:
         assert result is None
 
     @pytest.mark.asyncio
+    @patch.object(summarization, "SUMMARIZATION_ENABLED", True)
     async def test_call_claude_success(self):
-        """Test successful Claude API call."""
+        """Test successful Claude API call (when enabled)."""
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"content": [{"text": "Test summary"}]}
