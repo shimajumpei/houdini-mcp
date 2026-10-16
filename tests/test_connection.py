@@ -342,6 +342,66 @@ class TestGetConnectionInfo:
 
         assert "error" in info
 
+    def test_get_connection_info_drops_stale_connection(self, reset_connection_state):
+        """A failed probe reports disconnected and drops the stale connection."""
+        import houdini_mcp.connection as conn_module
+
+        stale_conn, stale_hou = _stale_connection()
+        conn_module._connection = stale_conn
+        conn_module._hou = stale_hou
+
+        info = get_connection_info("localhost", 18811)
+
+        assert info["connected"] is False
+        assert info["houdini_version"] is None
+        assert "10054" in info["error"]
+        stale_conn.close.assert_called_once()
+        assert conn_module._connection is None
+        assert conn_module._hou is None
+
+
+def _stale_connection():
+    """A connection whose socket still looks open but whose peer (Houdini) is gone."""
+    reset = ConnectionResetError(
+        "[WinError 10054] An existing connection was forcibly closed by the remote host"
+    )
+    stale_hou = MagicMock()
+    stale_hou.applicationVersionString.side_effect = reset
+    stale_hou.applicationVersion.side_effect = reset
+    stale_hou.hipFile.path.side_effect = reset
+    stale_conn = MagicMock()  # .closed is a MagicMock, not True, as for a half-dead socket
+    return stale_conn, stale_hou
+
+
+class TestCheckConnectionTool:
+    """Tests for the check_connection MCP tool."""
+
+    def test_stale_connection_reports_disconnected_then_reconnects(self, mock_rpyc_with_reset):
+        """After Houdini is closed the tool reports disconnected; the next call reconnects."""
+        import houdini_mcp.connection as conn_module
+        from houdini_mcp import server
+
+        stale_conn, stale_hou = _stale_connection()
+        conn_module._connection = stale_conn
+        conn_module._hou = stale_hou
+
+        result = server.check_connection.fn()
+
+        assert result["connected"] is False
+        assert result["status"] == "disconnected"
+        assert result["houdini_version"] is None
+        assert "10054" in result["error"]
+        assert conn_module._connection is None
+
+        # Houdini is back: the next call opens a fresh connection instead of reusing the stale one
+        result = server.check_connection.fn()
+
+        assert result["connected"] is True
+        assert result["status"] == "connected"
+        assert result["houdini_version"] == "20.5.123"
+        assert "error" not in result
+        assert conn_module._connection is not stale_conn
+
 
 class TestPing:
     """Tests for the ping function."""

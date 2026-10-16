@@ -358,18 +358,25 @@ def get_connection_info(host: str = "localhost", port: int = 18811) -> Dict[str,
 
     if is_connected():
         try:
-            info["connected"] = True
-            info["houdini_version"] = _hou.applicationVersionString()
+            version_string = _hou.applicationVersionString()
             version_tuple = _hou.applicationVersion()
+            hip_file = _hou.hipFile.path() or "untitled.hip"
+        except Exception as e:
+            # The socket looked open but Houdini did not answer (e.g. Houdini was
+            # closed: WinError 10054). Drop the stale connection so the next call
+            # reconnects instead of reusing it.
+            logger.warning(f"Connection probe failed, dropping stale connection: {e}")
+            info["error"] = str(e)
+            _safe_disconnect()
+        else:
+            info["connected"] = True
+            info["houdini_version"] = version_string
             info["houdini_build"] = {
                 "major": version_tuple[0],
                 "minor": version_tuple[1],
                 "build": version_tuple[2],
             }
-            info["hip_file"] = _hou.hipFile.path() or "untitled.hip"
-        except Exception as e:
-            logger.warning(f"Error getting connection info: {e}")
-            info["error"] = str(e)
+            info["hip_file"] = hip_file
 
     return info
 
