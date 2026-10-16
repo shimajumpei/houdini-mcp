@@ -380,7 +380,10 @@ def get_connection_info(host: str = "localhost", port: int = 18811) -> Dict[str,
             # closed: WinError 10054). Drop the stale connection so the next call
             # reconnects instead of reusing it.
             logger.warning(f"Connection probe failed, dropping stale connection: {e}")
-            info["error"] = str(e)
+            info["error"] = (
+                "Houdini was closed or its RPC server is not responding; "
+                f"start Houdini to reconnect (detail: {e})"
+            )
             _safe_disconnect()
         else:
             info["connected"] = True
