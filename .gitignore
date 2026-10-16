@@ -46,3 +46,8 @@ Thumbs.db
 
 # OpenCode local config
 opencode.json
+
+# Rules file the workflow gate copies into a project root when Houdini tools run here
+/CLAUDE.md
+# Local Claude Code settings
+.claude/settings.local.json

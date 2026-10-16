@@ -1,0 +1,29 @@
+{
+  "description": "Houdini MCP workflow gate (PreToolUse) and error/docs tracking (PostToolUse) for the plugin-bundled houdini-mcp server",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__plugin_houdini_houdini-mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/.venv/Scripts/python.exe",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/houdini_gate.py"]
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_houdini_houdini-mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/.venv/Scripts/python.exe",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/houdini_post_tool.py"]
+          }
+        ]
+      }
+    ]
+  }
+}

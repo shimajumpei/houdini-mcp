@@ -1,0 +1,23 @@
+{
+  "name": "houdini",
+  "displayName": "Houdini MCP",
+  "description": "Claude Code integration for SideFX Houdini: the houdini-mcp MCP server, the workflow gate hooks, Houdini skills, and the canonical rules file (rules/CLAUDE.md).",
+  "author": {
+    "name": "shimajumpei"
+  },
+  "repository": "https://github.com/shimajumpei/houdini-mcp",
+  "license": "MIT",
+  "keywords": ["houdini", "sidefx", "mcp", "crowd"],
+  "mcpServers": {
+    "houdini-mcp": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/.venv/Scripts/python.exe",
+      "args": ["-m", "houdini_mcp"],
+      "env": {
+        "MCP_TRANSPORT": "stdio",
+        "HOUDINI_HOST": "localhost",
+        "HOUDINI_PORT": "18811",
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      }
+    }
+  }
+}

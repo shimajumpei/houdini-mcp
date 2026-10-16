@@ -1,0 +1,14 @@
+{
+  "name": "houdini-mcp",
+  "description": "Local marketplace for the houdini-mcp repository. It lists one plugin whose root is this repository.",
+  "owner": {
+    "name": "shimajumpei"
+  },
+  "plugins": [
+    {
+      "name": "houdini",
+      "source": "./",
+      "description": "houdini-mcp MCP server, workflow gate hooks, Houdini skills, and rules"
+    }
+  ]
+}

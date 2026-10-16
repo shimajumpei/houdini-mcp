@@ -2,6 +2,50 @@
 
 An MCP (Model Context Protocol) server for controlling SideFX Houdini via `hrpyc`, enabling AI assistants like Claude, Cursor, and Letta agents to interact with Houdini sessions.
 
+## Claude Code integration on Windows (one-step setup)
+
+This repository is the single source for the Claude Code <-> Houdini integration. It is a
+Claude Code plugin named `houdini` (plugin root = repository root), listed in a local
+marketplace named `houdini-mcp` (`.claude-plugin/marketplace.json`).
+
+| Part | Where it lives |
+|------|----------------|
+| MCP server `houdini-mcp` | `.claude-plugin/plugin.json` (`mcpServers`): runs `.venv\Scripts\python.exe -m houdini_mcp` |
+| Gate hooks (PreToolUse, PostToolUse) | `hooks/hooks.json`, `hooks/houdini_gate.py`, `hooks/houdini_post_tool.py` |
+| Skills | `skills/houdini-exec`, `skills/houdini-info`, `skills/houdini-render`, `skills/crowd-setup` |
+| Rules | `rules/CLAUDE.md`. The gate copies it into a project that has no `CLAUDE.md` |
+| Houdini side | `houdini_plugin/` (auto-starts the RPyC server on port 18811) |
+
+**Setup.** Needs git, Python 3.10+ (3.12 tested), the Claude Code CLI, and Houdini installed
+under `C:\Program Files\Side Effects Software\Houdini <version>`. `setup.ps1` is the only entry point:
+
+```powershell
+git clone https://github.com/shimajumpei/houdini-mcp.git
+cd houdini-mcp
+powershell -ExecutionPolicy Bypass -File .\setup.ps1 -WhatIf   # print the actions only
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+Then restart Claude Code and Houdini. Re-running `setup.ps1` is safe.
+
+**What it changes on the PC** (nothing else):
+
+- `<repo>\.venv`: a virtual environment with `pip install -e .`
+- `Documents\houdini<major.minor>\packages\houdini_mcp.json`: one per installed Houdini version, pointing at `<repo>\houdini_plugin`
+- Claude Code user settings: the marketplace `houdini-mcp` (this folder, read in place) and the plugin `houdini@houdini-mcp` at user scope. Because the plugin is loaded in place, a `git pull` takes effect at the next Claude Code start or `/reload-plugins`
+
+Claude Code names tools of a plugin-bundled MCP server `mcp__plugin_<plugin>_<server>__<tool>`,
+so the tools appear as `mcp__plugin_houdini_houdini-mcp__<tool>`. Use that prefix in permission rules.
+
+**Uninstall:**
+
+```powershell
+claude plugin uninstall houdini@houdini-mcp --scope user
+claude plugin marketplace remove houdini-mcp
+Remove-Item "$([Environment]::GetFolderPath('MyDocuments'))\houdini*\packages\houdini_mcp.json"
+# then delete the cloned folder (it contains .venv)
+```
+
 ## Architecture
 
 ```
