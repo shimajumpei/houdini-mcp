@@ -23,13 +23,18 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "fastmcp>=0.1.0",
+    # fastmcp 3+/4+ is untested here and no longer pulls in httpx; 2.14 is the tested line
+    "fastmcp>=2.14,<3",
+    # Imported directly by tools/summarization.py
+    "httpx>=0.27,<1",
     # rpyc MUST be 5.x - version 6.x has protocol incompatibility with Houdini's hrpyc
     "rpyc>=5.0.0,<6.0.0",
     "python-dotenv>=1.0.0",
     # For get_houdini_help web scraping
     "requests>=2.28.0",
     "beautifulsoup4>=4.11.0",
+    # For workflow management (stages.yaml parsing)
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
