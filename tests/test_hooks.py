@@ -325,155 +325,148 @@ class TestGateHook:
 
 
 # ---------------------------------------------------------------------------
-# Gate hook CLAUDE.md injection tests
+# Gate hook rules delivery tests (Check 0)
 # ---------------------------------------------------------------------------
+
+RULES_FILE = REPO_ROOT / "rules" / "HOUDINI_RULES.md"
+
+
+def _rules_env(tmp_path: Path, **extra: str) -> dict:
+    """Environment with an isolated ack store (LOCALAPPDATA, temp) under tmp_path."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("HOUDINI_CLAUDE_MD_CANONICAL", "CLAUDE_PLUGIN_ROOT")}
+    env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
+    env["TMPDIR"] = env["TEMP"] = env["TMP"] = str(tmp_path / "temp")
+    (tmp_path / "temp").mkdir(exist_ok=True)
+    env.update(extra)
+    return env
+
+
+def _run_gate_session(tool_name, project_dir: Path, env: dict, session_id="sess-1"):
+    payload = {"tool_name": tool_name, "tool_input": {}, "cwd": str(project_dir)}
+    if session_id is not None:
+        payload["session_id"] = session_id
+    return subprocess.run(
+        [sys.executable, str(GATE_SCRIPT)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+        cwd=str(project_dir),
+    )
+
+
+def _ack_dir(tmp_path: Path) -> Path:
+    return tmp_path / "localappdata" / "houdini-mcp" / "rules-ack"
 
 
 @pytest.mark.skipif(not GATE_SCRIPT.exists(), reason="Gate hook script not installed")
-class TestGateHookClaudeMdInjection:
-    """Tests for Check 0: CLAUDE.md auto-injection in the gate hook."""
+class TestGateHookRulesDelivery:
+    """Check 0: the first houdini-mcp call of a session must make Claude read the rules."""
 
-    def test_copies_claude_md_when_missing(self, tmp_path: Path):
-        """CLAUDE.md missing → copied from canonical, gate check continues."""
-        # Set up canonical source
-        canonical_dir = tmp_path / "canonical"
-        canonical_dir.mkdir()
-        canonical_file = canonical_dir / "CLAUDE.md"
-        canonical_file.write_text("# Canonical CLAUDE.md\nRules here.", encoding="utf-8")
-
-        # Project dir has no CLAUDE.md but has gate_state that allows
+    def _project(self, tmp_path: Path) -> Path:
         project_dir = tmp_path / "project"
         project_dir.mkdir()
-        agent_dir = project_dir / ".agent"
-        agent_dir.mkdir()
-        (agent_dir / "gate_state.json").write_text(
-            json.dumps({
-                "workflow_initialized": True,
-                "ready_for_implementation": True,
-                "active_stage_in_progress": True,
-                "diff_approved": True,
-                "error_counts": {},
-            }, indent=2),
-            encoding="utf-8",
+        return project_dir
+
+    def test_first_call_denied_with_rules_path(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        result = _run_gate_session(
+            "mcp__houdini-mcp__get_scene_info", project_dir, _rules_env(tmp_path)
         )
-
-        stdin_data = json.dumps({
-            "tool_name": "mcp__houdini-mcp__create_node",
-            "tool_input": {"node_type": "geo"},
-            "cwd": str(project_dir),
-        })
-
-        result = subprocess.run(
-            [sys.executable, str(GATE_SCRIPT)],
-            input=stdin_data,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={**os.environ, "HOUDINI_CLAUDE_MD_CANONICAL": str(canonical_file)},
-        )
-
         assert result.returncode == 0
-        # CLAUDE.md should have been copied
-        assert (project_dir / "CLAUDE.md").exists()
-        assert (project_dir / "CLAUDE.md").read_text(encoding="utf-8") == "# Canonical CLAUDE.md\nRules here."
-        # All gate checks pass → allow (no stdout)
+        output = json.loads(result.stdout)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+        assert str(RULES_FILE.resolve()) in reason
+        assert "Read tool" in reason
+        assert "retry" in reason
+        assert (_ack_dir(tmp_path) / "sess-1").exists()
+
+    def test_second_call_same_session_passes_check0(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        env = _rules_env(tmp_path)
+        _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
+        result = _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
+        assert result.returncode == 0
         assert result.stdout.strip() == ""
 
-    def test_does_not_overwrite_existing_claude_md(self, tmp_path: Path):
-        """Existing CLAUDE.md is not overwritten."""
-        canonical_dir = tmp_path / "canonical"
-        canonical_dir.mkdir()
-        canonical_file = canonical_dir / "CLAUDE.md"
-        canonical_file.write_text("# Canonical version", encoding="utf-8")
+    def test_second_call_change_tool_reaches_existing_checks(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        env = _rules_env(tmp_path)
+        _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
+        result = _run_gate_session("mcp__houdini-mcp__create_node", project_dir, env)
+        output = json.loads(result.stdout)
+        reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "Workflow not initialized" in reason
+        assert "HOUDINI_RULES" not in reason
 
-        project_dir = tmp_path / "project"
-        project_dir.mkdir()
-        (project_dir / "CLAUDE.md").write_text("# Custom version", encoding="utf-8")
-
-        stdin_data = json.dumps({
-            "tool_name": "mcp__houdini-mcp__create_node",
-            "tool_input": {"node_type": "geo"},
-            "cwd": str(project_dir),
-        })
-
-        result = subprocess.run(
-            [sys.executable, str(GATE_SCRIPT)],
-            input=stdin_data,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={**os.environ, "HOUDINI_CLAUDE_MD_CANONICAL": str(canonical_file)},
+    def test_different_session_denied_again(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        env = _rules_env(tmp_path)
+        _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
+        result = _run_gate_session(
+            "mcp__houdini-mcp__get_scene_info", project_dir, env, session_id="sess-2"
         )
-
-        assert result.returncode == 0
-        # Custom version preserved
-        assert (project_dir / "CLAUDE.md").read_text(encoding="utf-8") == "# Custom version"
-        # No gate_state → deny (fail-closed for modification tools)
         output = json.loads(result.stdout)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert str(RULES_FILE.resolve()) in output["hookSpecificOutput"]["permissionDecisionReason"]
 
-    def test_skips_when_canonical_missing(self, tmp_path: Path):
-        """No canonical file → no copy attempted, but still deny (no gate_state)."""
-        project_dir = tmp_path / "project"
-        project_dir.mkdir()
+    def test_nothing_written_to_project_dir(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        env = _rules_env(tmp_path)
+        for session_id in ("sess-1", "sess-1", "sess-2", None):
+            _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env, session_id)
+        assert list(project_dir.iterdir()) == []
 
-        stdin_data = json.dumps({
-            "tool_name": "mcp__houdini-mcp__create_node",
-            "tool_input": {"node_type": "geo"},
-            "cwd": str(project_dir),
-        })
-
-        result = subprocess.run(
-            [sys.executable, str(GATE_SCRIPT)],
-            input=stdin_data,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={**os.environ, "HOUDINI_CLAUDE_MD_CANONICAL": str(tmp_path / "nonexistent" / "CLAUDE.md")},
+    def test_missing_session_id_allows_and_writes_nothing(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        result = _run_gate_session(
+            "mcp__houdini-mcp__get_scene_info", project_dir, _rules_env(tmp_path), session_id=None
         )
-
         assert result.returncode == 0
-        assert not (project_dir / "CLAUDE.md").exists()
-        # No gate_state → deny (fail-closed for modification tools)
+        assert result.stdout.strip() == ""
+        assert not (tmp_path / "localappdata").exists()
+        assert list((tmp_path / "temp").iterdir()) == []
+        assert list(project_dir.iterdir()) == []
+
+    def test_override_path_used_in_reason(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        custom = tmp_path / "custom_rules.md"
+        custom.write_text("# rules", encoding="utf-8")
+        env = _rules_env(tmp_path, HOUDINI_CLAUDE_MD_CANONICAL=str(custom))
+        result = _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
         output = json.loads(result.stdout)
-        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "ensure_project" in output["hookSpecificOutput"]["permissionDecisionReason"]
+        assert str(custom.resolve()) in output["hookSpecificOutput"]["permissionDecisionReason"]
 
-    def test_denies_on_copy_failure(self, tmp_path: Path):
-        """Copy failure → deny with manual-copy instruction."""
-        canonical_dir = tmp_path / "canonical"
-        canonical_dir.mkdir()
-        canonical_file = canonical_dir / "CLAUDE.md"
-        canonical_file.write_text("# Canonical", encoding="utf-8")
+    def test_missing_rules_file_skips_check0(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        env = _rules_env(tmp_path, HOUDINI_CLAUDE_MD_CANONICAL=str(tmp_path / "missing.md"))
+        result = _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
+        assert result.stdout.strip() == ""
+        assert not _ack_dir(tmp_path).exists()
 
-        # Use a non-writable directory as project_dir
-        project_dir = tmp_path / "readonly_project"
-        project_dir.mkdir()
-        # Make project_dir read-only (on Windows, we simulate by using a file path as dir)
-        # Instead, point to an invalid path that can't be written
-        bad_project_dir = tmp_path / "no_such_dir" / "deep" / "path"
-        # Don't create it — copy will fail because parent doesn't exist
+    def test_falls_back_to_temp_dir_without_localappdata(self, tmp_path: Path):
+        project_dir = self._project(tmp_path)
+        env = _rules_env(tmp_path)
+        del env["LOCALAPPDATA"]
+        result = _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
+        assert json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert (tmp_path / "temp" / "houdini-mcp" / "rules-ack" / "sess-1").exists()
+        result = _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
+        assert result.stdout.strip() == ""
 
-        stdin_data = json.dumps({
-            "tool_name": "mcp__houdini-mcp__create_node",
-            "tool_input": {"node_type": "geo"},
-            "cwd": str(bad_project_dir),
-        })
-
-        result = subprocess.run(
-            [sys.executable, str(GATE_SCRIPT)],
-            input=stdin_data,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={**os.environ, "HOUDINI_CLAUDE_MD_CANONICAL": str(canonical_file)},
-        )
-
-        assert result.returncode == 0
-        output = json.loads(result.stdout)
-        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "CLAUDE.md" in output["hookSpecificOutput"]["permissionDecisionReason"]
-        assert "auto-copy failed" in output["hookSpecificOutput"]["permissionDecisionReason"]
+    def test_never_writes_ack_into_cwd_used_as_temp(self, tmp_path: Path):
+        """If the temp dir resolves to the project dir, no ack is written there."""
+        project_dir = self._project(tmp_path)
+        env = _rules_env(tmp_path)
+        del env["LOCALAPPDATA"]
+        env["TMPDIR"] = env["TEMP"] = env["TMP"] = str(project_dir)
+        result = _run_gate_session("mcp__houdini-mcp__get_scene_info", project_dir, env)
+        assert result.stdout.strip() == ""
+        assert list(project_dir.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

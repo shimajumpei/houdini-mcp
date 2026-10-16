@@ -1,7 +1,7 @@
 {
   "name": "houdini",
   "displayName": "Houdini MCP",
-  "description": "Claude Code integration for SideFX Houdini: the houdini-mcp MCP server, the workflow gate hooks, Houdini skills, and the canonical rules file (rules/CLAUDE.md).",
+  "description": "Claude Code integration for SideFX Houdini: the houdini-mcp MCP server, the workflow gate hooks, Houdini skills, and the Houdini rules file (rules/HOUDINI_RULES.md).",
   "author": {
     "name": "shimajumpei"
   },

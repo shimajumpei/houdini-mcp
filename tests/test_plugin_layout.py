@@ -18,7 +18,7 @@ MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 GATE_SCRIPT = REPO_ROOT / "hooks" / "houdini_gate.py"
 POST_SCRIPT = REPO_ROOT / "hooks" / "houdini_post_tool.py"
-RULES_FILE = REPO_ROOT / "rules" / "CLAUDE.md"
+RULES_FILE = REPO_ROOT / "rules" / "HOUDINI_RULES.md"
 SERVER_NAME = "houdini-mcp"
 
 
@@ -47,6 +47,12 @@ def _run(script: Path, payload: dict, **env: str) -> subprocess.CompletedProcess
         timeout=10,
         env=_env(**env),
     )
+
+
+def _deny_reason(result: subprocess.CompletedProcess) -> str:
+    output = json.loads(result.stdout)
+    assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+    return output["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 class TestManifests:
@@ -97,7 +103,7 @@ class TestPluginPrefixedToolNames:
         output = json.loads(result.stdout)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-    def test_gate_allows_read_only_tool_and_copies_rules_from_plugin_root(self, tmp_path: Path):
+    def test_gate_allows_read_only_tool_without_session(self, tmp_path: Path):
         result = _run(GATE_SCRIPT, {
             "tool_name": _plugin_prefix() + "get_scene_info",
             "tool_input": {},
@@ -105,16 +111,33 @@ class TestPluginPrefixedToolNames:
         }, CLAUDE_PLUGIN_ROOT=str(REPO_ROOT))
         assert result.returncode == 0
         assert result.stdout.strip() == ""
-        assert (tmp_path / "CLAUDE.md").read_bytes() == RULES_FILE.read_bytes()
+        assert list(tmp_path.iterdir()) == []
 
-    def test_gate_copies_rules_without_plugin_root(self, tmp_path: Path):
-        result = _run(GATE_SCRIPT, {
+    def test_first_call_points_to_rules_in_plugin_root(self, tmp_path: Path):
+        project = tmp_path / "project"
+        project.mkdir()
+        payload = {
+            "session_id": "plugin-sess",
             "tool_name": _plugin_prefix() + "get_scene_info",
             "tool_input": {},
-            "cwd": str(tmp_path),
-        })
-        assert result.returncode == 0
-        assert (tmp_path / "CLAUDE.md").read_bytes() == RULES_FILE.read_bytes()
+            "cwd": str(project),
+        }
+        env = {"CLAUDE_PLUGIN_ROOT": REPO_ROOT.as_posix(), "LOCALAPPDATA": str(tmp_path / "lad")}
+        reason = _deny_reason(_run(GATE_SCRIPT, payload, **env))
+        assert str(RULES_FILE.resolve()) in reason
+        assert _run(GATE_SCRIPT, payload, **env).stdout.strip() == ""
+        assert list(project.iterdir()) == []
+
+    def test_first_call_points_to_rules_without_plugin_root(self, tmp_path: Path):
+        project = tmp_path / "project"
+        project.mkdir()
+        reason = _deny_reason(_run(GATE_SCRIPT, {
+            "session_id": "script-relative-sess",
+            "tool_name": _plugin_prefix() + "get_scene_info",
+            "tool_input": {},
+            "cwd": str(project),
+        }, LOCALAPPDATA=str(tmp_path / "lad")))
+        assert str(RULES_FILE.resolve()) in reason
 
     def test_gate_ignores_other_servers(self, tmp_path: Path):
         result = _run(GATE_SCRIPT, {
@@ -124,7 +147,7 @@ class TestPluginPrefixedToolNames:
         }, CLAUDE_PLUGIN_ROOT=str(REPO_ROOT))
         assert result.returncode == 0
         assert result.stdout.strip() == ""
-        assert not (tmp_path / "CLAUDE.md").exists()
+        assert list(tmp_path.iterdir()) == []
 
     def test_post_hook_records_short_tool_name(self, tmp_path: Path):
         agent_dir = tmp_path / ".agent"

@@ -11,7 +11,11 @@ everything else (including newly added server tools) is treated as a
 change tool and must satisfy the gate checks. New mutating tools are
 therefore gated automatically without touching the hook configuration.
 
-Check 0: Ensures CLAUDE.md exists in project directory (auto-copy from canonical).
+Check 0: Rules delivery. The first houdini-mcp tool call of a Claude Code
+session is denied with an instruction to read the rules file
+(rules/HOUDINI_RULES.md) with the Read tool and retry. Delivery is recorded
+per session_id under %LOCALAPPDATA%/houdini-mcp/rules-ack (fallback: the temp
+dir), never in the project directory. The rules file is never copied.
 
 Shipped in the houdini-mcp repo (hooks/) and registered by the Claude Code
 plugin manifest (hooks/hooks.json). Tool names arrive either as
@@ -19,11 +23,13 @@ mcp__houdini-mcp__<tool> (server registered directly) or as
 mcp__plugin_<plugin>_houdini-mcp__<tool> (server bundled in the plugin).
 """
 
+import hashlib
 import json
 import os
 import re
-import shutil
 import sys
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 # mcp__houdini-mcp__<tool> or mcp__plugin_<plugin-name>_houdini-mcp__<tool>
@@ -36,13 +42,17 @@ def short_tool_name(tool_name):
     return match.group("tool") if match else None
 
 
+RULES_FILENAME = "HOUDINI_RULES.md"
+
+
 def canonical_rules_path():
-    """Locate the canonical rules file (CLAUDE.md) to copy into projects.
+    """Locate the canonical Houdini rules file that Claude must read.
 
     Order: HOUDINI_CLAUDE_MD_CANONICAL env override (used as-is), then
-    <plugin root>/rules/CLAUDE.md via CLAUDE_PLUGIN_ROOT, then rules/ next to
-    this script's parent directory, then the legacy ~/.claude/houdini/CLAUDE.md.
-    Returns the first existing candidate, or the first candidate if none exist.
+    <plugin root>/rules/HOUDINI_RULES.md via CLAUDE_PLUGIN_ROOT, then rules/
+    next to this script's parent directory, then the legacy
+    ~/.claude/houdini/CLAUDE.md. Returns the first existing candidate, or the
+    first candidate if none exist.
     """
     override = os.environ.get("HOUDINI_CLAUDE_MD_CANONICAL")
     if override:
@@ -50,13 +60,71 @@ def canonical_rules_path():
     candidates = []
     plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
     if plugin_root:
-        candidates.append(Path(plugin_root) / "rules" / "CLAUDE.md")
-    candidates.append(Path(__file__).resolve().parent.parent / "rules" / "CLAUDE.md")
+        candidates.append(Path(plugin_root) / "rules" / RULES_FILENAME)
+    candidates.append(Path(__file__).resolve().parent.parent / "rules" / RULES_FILENAME)
     candidates.append(Path.home() / ".claude" / "houdini" / "CLAUDE.md")
     for candidate in candidates:
         if candidate.exists():
             return candidate
     return candidates[0]
+
+
+def _same_path(a, b):
+    try:
+        return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+    except (OSError, ValueError):
+        return False
+
+
+def rules_ack_dirs(forbidden_dirs=()):
+    """Directories that may hold per-session rules acknowledgements.
+
+    %LOCALAPPDATA%/houdini-mcp/rules-ack first, then <temp>/houdini-mcp/rules-ack.
+    A base directory equal to one of forbidden_dirs (the cwd / project dir)
+    is skipped, so nothing is ever written there.
+    """
+    bases = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        bases.append(Path(local))
+    bases.append(Path(tempfile.gettempdir()))
+    dirs = []
+    for base in bases:
+        if any(_same_path(base, f) for f in forbidden_dirs if f):
+            continue
+        dirs.append(base / "houdini-mcp" / "rules-ack")
+    return dirs
+
+
+def rules_ack_name(session_id):
+    """File name for a session's acknowledgement (session ids are UUIDs)."""
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+        return session_id
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+
+
+def rules_acknowledged(session_id, ack_dirs):
+    name = rules_ack_name(session_id)
+    return any((d / name).exists() for d in ack_dirs)
+
+
+def record_rules_ack(session_id, rules_path, ack_dirs):
+    """Record that the rules were delivered in this session. Returns success."""
+    payload = json.dumps({
+        "session_id": session_id,
+        "rules_path": str(rules_path),
+        "delivered_at": datetime.now(timezone.utc).isoformat(),
+    })
+    name = rules_ack_name(session_id)
+    for ack_dir in ack_dirs:
+        try:
+            ack_dir.mkdir(parents=True, exist_ok=True)
+            (ack_dir / name).write_text(payload, encoding="utf-8")
+            return True
+        except OSError:
+            continue
+    return False
+
 
 # Read-only tools: inspection, rendering, help. Never modify the scene.
 READ_ONLY_TOOLS = {
@@ -129,24 +197,28 @@ def main():
     project_dir = hook_input.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())
 
     # ------------------------------------------------------------------
-    # Check 0: Ensure CLAUDE.md exists in project directory
-    # (runs for ALL houdini tools, including read-only ones, so the rules
-    # land in the project as soon as Houdini work starts)
+    # Check 0: Rules delivery, once per Claude Code session
+    # (runs for ALL houdini tools, including read-only ones). The first call
+    # of a session is denied with an instruction to Read the rules file; the
+    # delivery is recorded per session_id outside the project directory.
+    # Fail-open (no deny, nothing written) when session_id is missing, the
+    # rules file cannot be found, or the acknowledgement cannot be recorded.
     # ------------------------------------------------------------------
-    canonical = canonical_rules_path()
-    target = Path(project_dir) / "CLAUDE.md"
-
-    if not target.exists() and canonical.exists():
-        try:
-            shutil.copy2(str(canonical), str(target))
-        except OSError:
-            if short_name not in ALLOWED_TOOLS:
-                deny(
-                    f"CLAUDE.md is missing and auto-copy failed. "
-                    f"Manually copy {canonical} to {target}.",
-                    "ensure_project",
-                )
-                return
+    session_id = hook_input.get("session_id")
+    if isinstance(session_id, str) and session_id.strip():
+        ack_dirs = rules_ack_dirs(forbidden_dirs=(project_dir, os.getcwd()))
+        if not rules_acknowledged(session_id, ack_dirs):
+            rules_path = canonical_rules_path()
+            if rules_path.exists():
+                rules_path = rules_path.resolve()
+                if record_rules_ack(session_id, rules_path, ack_dirs):
+                    deny(
+                        "Houdini rules are not loaded in this session yet. "
+                        f"Read the rules file with the Read tool: {rules_path} . "
+                        "Follow those rules for all Houdini work in this session, "
+                        f"then retry this {short_name} call."
+                    )
+                    return
 
     # ------------------------------------------------------------------
     # Allowlist: read-only and workflow tools pass without gate checks

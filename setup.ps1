@@ -14,7 +14,7 @@
                     ("claude plugin marketplace add <repo>") and installs the plugin from it at
                     user scope ("claude plugin install <plugin>@<marketplace> --scope user").
                     The plugin provides the houdini-mcp MCP server, the gate hooks, the skills,
-                    and rules/CLAUDE.md. It is loaded in place from this repository.
+                    and rules/HOUDINI_RULES.md. It is loaded in place from this repository.
 
     Every path is derived from this script's location, the Documents folder
     ([Environment]::GetFolderPath('MyDocuments')) and $env:ProgramFiles. HOME is never read,

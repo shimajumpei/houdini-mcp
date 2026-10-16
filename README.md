@@ -13,7 +13,7 @@ marketplace named `houdini-mcp` (`.claude-plugin/marketplace.json`).
 | MCP server `houdini-mcp` | `.claude-plugin/plugin.json` (`mcpServers`): runs `.venv\Scripts\python.exe -m houdini_mcp` |
 | Gate hooks (PreToolUse, PostToolUse) | `hooks/hooks.json`, `hooks/houdini_gate.py`, `hooks/houdini_post_tool.py` |
 | Skills | `skills/houdini-exec`, `skills/houdini-info`, `skills/houdini-render`, `skills/crowd-setup` |
-| Rules | `rules/CLAUDE.md`. The gate copies it into a project that has no `CLAUDE.md` |
+| Rules | `rules/HOUDINI_RULES.md`, the only copy. Delivered once per session by the gate (see below) |
 | Houdini side | `houdini_plugin/` (auto-starts the RPyC server on port 18811) |
 
 **Setup.** Needs git, Python 3.10+ (3.12 tested), the Claude Code CLI, and Houdini installed
@@ -36,6 +36,15 @@ Then restart Claude Code and Houdini. Re-running `setup.ps1` is safe.
 
 Claude Code names tools of a plugin-bundled MCP server `mcp__plugin_<plugin>_<server>__<tool>`,
 so the tools appear as `mcp__plugin_houdini_houdini-mcp__<tool>`. Use that prefix in permission rules.
+
+**How the rules reach Claude.** The plugin is installed at user scope, so the Houdini tools exist in
+every session, but the rules are loaded only when Houdini work starts. The first `houdini-mcp` tool
+call in a Claude Code session (any tool, read-only included) is denied by the gate hook. The deny
+reason gives the absolute path of `rules/HOUDINI_RULES.md` and tells Claude to read it with the
+Read tool and retry. The gate records the delivery per `session_id` in
+`%LOCALAPPDATA%\houdini-mcp\rules-ack\<session_id>` (fallback: the temp folder), so later calls in
+the same session go straight to the normal gate checks. Nothing is written to the project folder
+and the rules file is never copied. `HOUDINI_CLAUDE_MD_CANONICAL` overrides the rules path.
 
 **Uninstall:**
 
