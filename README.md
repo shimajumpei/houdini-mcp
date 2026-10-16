@@ -553,6 +553,29 @@ python -m houdini_mcp
 - hrpyc uses no authentication by default
 - Ensure you're on a trusted network
 
+### Houdini was closed or restarted
+The MCP server is a long-lived process: it keeps running for the whole Claude
+Code session, and `/reload-plugins` does not restart it. It therefore has to
+survive Houdini being closed and reopened on its own:
+
+- Every tool gets the `hou` module through `ensure_connected()`, which checks the
+  cached RPyC connection with one cheap RPC (`hou.applicationVersion()`) before
+  reusing it. A dead stream (Houdini closed: `[WinError 10054]`, `stream has
+  been closed`) is closed and dropped, and a new connection is opened, all
+  inside the same tool call.
+- While Houdini is closed, tools fail with `Failed to connect to Houdini at
+  host:port after N attempts. Houdini is not running, or its RPC server is not
+  listening ...`, and `check_connection` reports `connected: false`.
+- Once Houdini is open again (the package's `456.py` restarts the RPC server
+  on port 18811), the next tool call works. You do not need to restart the
+  MCP server or the session.
+- No change is needed on the Houdini side. `tests/test_reconnect_live.py`
+  checks open → close → reopen against a real RPyC classic server that serves
+  a stub `hou` module, so it needs neither Houdini nor a license.
+
+New server code only takes effect in a new Claude Code session, because the
+running MCP server is not restarted by `git pull` or `/reload-plugins`.
+
 ## Project Structure
 
 ```

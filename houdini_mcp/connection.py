@@ -228,8 +228,10 @@ def connect(
 
     raise HoudiniConnectionError(
         f"Failed to connect to Houdini at {host}:{port} after {max_retries} attempts. "
-        f"Make sure Houdini is running with RPC server enabled "
-        f"(run 'import hrpyc; hrpyc.start_server()' in Houdini's Python shell). "
+        f"Houdini is not running, or its RPC server is not listening on port {port}. "
+        f"Start Houdini (the houdini_mcp package starts the RPC server automatically "
+        f"on scene load; otherwise run 'import hrpyc; hrpyc.start_server()' in "
+        f"Houdini's Python shell) and retry. "
         f"Last error: {last_error}"
     )
 
@@ -315,7 +317,11 @@ def is_connected(validate: bool = False) -> bool:
         return True
     except Exception as e:
         logger.debug(f"Connection check failed: {e}")
-        # Connection is dead, clean up
+        # Connection is dead: close the stale socket (best effort), then clean up
+        try:
+            _connection.close()
+        except Exception:
+            pass
         _connection = None
         _hou = None
         return False
@@ -328,13 +334,21 @@ def ensure_connected(host: str = "localhost", port: int = 18811) -> Any:
     This is the preferred method for tools to get the hou module,
     as it handles connection recovery automatically.
 
+    The cached connection is validated with one cheap RPC before it is
+    reused. When Houdini is closed and reopened, the old RPyC stream is dead
+    but its socket can still look open (``closed`` is False), so a check
+    without an RPC would hand the dead connection to the tool and the first
+    call after a restart would fail. Validating here drops the dead
+    connection and reconnects transparently, without restarting the MCP
+    server.
+
     Returns:
         The remote hou module
 
     Raises:
         HoudiniConnectionError: If unable to establish connection
     """
-    if not is_connected():
+    if not is_connected(validate=True):
         logger.info("Connection lost or not established, reconnecting...")
         connect(host, port)
     return _hou
