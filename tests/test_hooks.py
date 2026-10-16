@@ -626,3 +626,169 @@ class TestPostToolHook:
             timeout=10,
         )
         assert result.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# Post-tool hook with realistic Claude Code PostToolUse payloads
+# ---------------------------------------------------------------------------
+
+PLUGIN_PREFIX = "mcp__plugin_houdini_houdini-mcp__"
+
+
+def _post_tool_use_payload(tool, tool_input, tool_response, tmp_path):
+    """Build a PostToolUse stdin payload in the shape Claude Code sends."""
+    return {
+        "session_id": "11111111-2222-3333-4444-555555555555",
+        "transcript_path": str(tmp_path / "transcript.jsonl"),
+        "cwd": str(tmp_path),
+        "permission_mode": "default",
+        "hook_event_name": "PostToolUse",
+        "tool_name": PLUGIN_PREFIX + tool,
+        "tool_input": tool_input,
+        "tool_response": tool_response,
+        "tool_use_id": "toolu_01ABCDEF",
+    }
+
+
+def _run_post_hook_payload(payload, gate_state, tmp_path):
+    agent_dir = tmp_path / ".agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "gate_state.json").write_text(json.dumps(gate_state, indent=2), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(POST_SCRIPT)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    return _read_gate_state(tmp_path)
+
+
+def _text_blocks(result):
+    """MCP content blocks as Claude Code records them for a dict-returning tool."""
+    return [{"type": "text", "text": json.dumps(result, indent=2)}]
+
+
+def _fresh_gate():
+    return {
+        "workflow_initialized": True,
+        "error_counts": {},
+        "docs_referenced": False,
+        "schema_checked": {},
+        "verified_node_types": [],
+        "verified_params": {},
+    }
+
+
+@pytest.mark.skipif(not POST_SCRIPT.exists(), reason="Post-tool hook script not installed")
+class TestPostToolHookRealPayload:
+    def test_error_as_json_string_increments_count(self, tmp_path: Path):
+        payload = _post_tool_use_payload(
+            "create_node",
+            {"parent_path": "/obj", "node_type": "nosuchtype"},
+            json.dumps({"status": "error", "message": "Unknown node type"}),
+            tmp_path,
+        )
+        updated = _run_post_hook_payload(payload, _fresh_gate(), tmp_path)
+        assert updated["error_counts"] == {"create_node": 1}
+
+    def test_error_as_text_blocks_increments_count(self, tmp_path: Path):
+        payload = _post_tool_use_payload(
+            "set_parameter",
+            {"node_path": "/obj/geo1/box1", "param_name": "sizex", "value": 2},
+            _text_blocks({"status": "error", "message": "Parameter not found"}),
+            tmp_path,
+        )
+        updated = _run_post_hook_payload(payload, _fresh_gate(), tmp_path)
+        assert updated["error_counts"] == {"set_parameter": 1}
+
+    def test_list_node_types_text_blocks_populates_verified(self, tmp_path: Path):
+        payload = _post_tool_use_payload(
+            "list_node_types",
+            {"category": "Sop", "name_filter": "box"},
+            _text_blocks(
+                {
+                    "status": "success",
+                    "count": 2,
+                    "node_types": [
+                        {"name": "box", "category": "Sop", "description": "Box"},
+                        {"name": "boxify", "category": "Sop", "description": "Boxify"},
+                    ],
+                }
+            ),
+            tmp_path,
+        )
+        updated = _run_post_hook_payload(payload, _fresh_gate(), tmp_path)
+        assert updated["verified_node_types"] == ["box", "boxify"]
+
+    def test_get_parameter_schema_json_string_populates_verified(self, tmp_path: Path):
+        gate = _fresh_gate()
+        gate["error_counts"] = {"set_parameter": 2}
+        payload = _post_tool_use_payload(
+            "get_parameter_schema",
+            {"node_path": "/obj/geo1/box1"},
+            json.dumps(
+                {
+                    "status": "success",
+                    "node_path": "/obj/geo1/box1",
+                    "parameters": [{"name": "size", "type": "float"}, {"name": "t", "type": "float"}],
+                    "count": 2,
+                }
+            ),
+            tmp_path,
+        )
+        updated = _run_post_hook_payload(payload, gate, tmp_path)
+        assert updated["docs_referenced"] is True
+        assert updated["error_counts"] == {}
+        assert updated["schema_checked"] == {"/obj/geo1/box1": True}
+        assert updated["verified_params"] == {"/obj/geo1/box1": ["size", "t"]}
+
+    def test_plain_dict_response(self, tmp_path: Path):
+        payload = _post_tool_use_payload(
+            "create_node", {"node_type": "geo"}, {"status": "error", "message": "boom"}, tmp_path
+        )
+        updated = _run_post_hook_payload(payload, _fresh_gate(), tmp_path)
+        assert updated["error_counts"] == {"create_node": 1}
+
+    def test_wrapper_dict_with_structured_content(self, tmp_path: Path):
+        result = {"status": "success", "node_types": [{"name": "sphere"}]}
+        payload = _post_tool_use_payload(
+            "list_node_types",
+            {"category": "Sop"},
+            {"content": _text_blocks(result), "structuredContent": result, "isError": False},
+            tmp_path,
+        )
+        updated = _run_post_hook_payload(payload, _fresh_gate(), tmp_path)
+        assert updated["verified_node_types"] == ["sphere"]
+
+    def test_wrapper_dict_is_error_with_plain_text(self, tmp_path: Path):
+        payload = _post_tool_use_payload(
+            "create_node",
+            {"node_type": "geo"},
+            {
+                "content": [{"type": "text", "text": "Error executing tool create_node: boom"}],
+                "isError": True,
+            },
+            tmp_path,
+        )
+        updated = _run_post_hook_payload(payload, _fresh_gate(), tmp_path)
+        assert updated["error_counts"] == {"create_node": 1}
+
+    def test_tool_response_preferred_over_tool_output(self, tmp_path: Path):
+        payload = _post_tool_use_payload(
+            "create_node", {}, json.dumps({"status": "success"}), tmp_path
+        )
+        payload["tool_output"] = {"status": "error"}
+        updated = _run_post_hook_payload(payload, _fresh_gate(), tmp_path)
+        assert updated["error_counts"] == {}
+
+    def test_non_json_and_image_responses_leave_state_unchanged(self, tmp_path: Path):
+        gate = _fresh_gate()
+        for response in (
+            "plain text, not JSON",
+            [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}],
+        ):
+            payload = _post_tool_use_payload("render_viewport", {}, response, tmp_path)
+            updated = _run_post_hook_payload(payload, gate, tmp_path)
+            assert updated == gate

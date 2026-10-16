@@ -29,6 +29,52 @@ DOC_TOOLS = {
 }
 
 
+def parse_tool_result(response):
+    """Recover the tool's result dict from the PostToolUse tool result.
+
+    Claude Code delivers an MCP tool result in one of these shapes:
+    - str: the tool's JSON text, e.g. '{"status": "success", ...}'
+    - list: MCP content blocks, e.g. [{"type": "text", "text": "{...}"}]
+    - dict: the result itself, or a CallToolResult-like wrapper
+      ({"content": [...], "structuredContent": {...}, "isError": bool})
+
+    Returns {} when no dict can be recovered (e.g. plain text or images).
+    """
+    if isinstance(response, str):
+        try:
+            decoded = json.loads(response)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+        if isinstance(decoded, (dict, list)):
+            return parse_tool_result(decoded)
+        return {}
+
+    if isinstance(response, list):
+        for block in response:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parsed = parse_tool_result(block.get("text", ""))
+                if parsed:
+                    return parsed
+        return {}
+
+    if isinstance(response, dict):
+        is_wrapper = "status" not in response and (
+            "content" in response or "structuredContent" in response
+        )
+        if not is_wrapper:
+            return response
+        structured = response.get("structuredContent")
+        if isinstance(structured, dict):
+            parsed = structured
+        else:
+            parsed = parse_tool_result(response.get("content", []))
+        if response.get("isError") is True and parsed.get("status") != "error":
+            parsed = {**parsed, "status": "error"}
+        return parsed
+
+    return {}
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -40,7 +86,11 @@ def main():
 
     tool_name = hook_input.get("tool_name", "")
     tool_input = hook_input.get("tool_input", {})
-    tool_output = hook_input.get("tool_output", {})
+    # Claude Code sends the result as tool_response; tool_output is the old name.
+    if "tool_response" in hook_input:
+        tool_response = hook_input["tool_response"]
+    else:
+        tool_response = hook_input.get("tool_output", {})
 
     # Strip MCP prefix (direct or plugin-bundled server)
     short_name = tool_name
@@ -62,13 +112,8 @@ def main():
 
     modified = False
 
-    # Parse tool_output to check for errors
-    result_data = tool_output
-    if isinstance(result_data, str):
-        try:
-            result_data = json.loads(result_data)
-        except (json.JSONDecodeError, Exception):
-            result_data = {}
+    # Parse the tool result to check for errors
+    result_data = parse_tool_result(tool_response)
 
     # Track errors
     is_error = isinstance(result_data, dict) and result_data.get("status") == "error"
